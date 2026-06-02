@@ -1,0 +1,180 @@
+# Autonomous Full-Stack QA Agent — Cursor Rules
+
+> **Purpose:** Enforce tech stack, architecture, and coding discipline for this project.
+> **Memory Bank:** Read `.cursor/memory/activeContext.md`, `.cursor/memory/progress.md`, and `.cursor/memory/systemPatterns.md` at session start.
+> **Scope:** Implement only what is documented in the Memory Bank. Do not invent features outside spec without updating memory files first.
+
+---
+
+## 1. Tech Stack (Locked)
+
+| Requirement | Value |
+|-------------|-------|
+| Runtime | Node.js **20+** |
+| Modules | **ESM** (`"type": "module"` in package.json) |
+| Language | **TypeScript strict mode** |
+| Entry | `tsx src/index.ts` |
+
+### Approved Runtime Dependencies
+`openai`, `playwright`, `pixelmatch`, `pngjs`, `axios`, `chokidar`, `express`, `zod`, `pino`, `dotenv`
+
+**Do not add dependencies** without updating `.cursor/memory/systemArchitecture.md` and `progress.md`.
+
+---
+
+## 2. Core Principles
+
+### KISS (Keep It Simple, Stupid)
+- Smallest solution that satisfies the requirement.
+- One file = one responsibility per the project structure.
+- No premature abstraction or speculative configuration.
+
+### DRY (Don't Repeat Yourself)
+- Shared types in `src/utils/types.ts`.
+- Config in `src/utils/config.ts` only — no scattered `process.env` reads.
+- Logger in `src/utils/logger.ts` — no ad-hoc `console.log`.
+
+### YAGNI
+- Phase 2 features (Slack, SQLite, baselines CLI, multi-env, GitHub PR) are **out of scope** until Phase 1 core is complete and documented in `progress.md`.
+- **No automatic PR creation** — patches are applied locally; humans review and commit changes.
+
+---
+
+## 3. Project Structure (Strict)
+
+```
+src/
+├── index.ts                  # CLI entry: run | watch | webhook
+├── orchestrator.ts           # Main QA cycle — wires all layers
+├── ui/
+│   ├── screenshot.ts         # Playwright capture
+│   ├── figma.ts              # Figma REST API
+│   ├── pixelDiff.ts          # pixelmatch
+│   └── semanticDiff.ts       # Claude Vision
+├── api/
+│   ├── routeParser.ts        # Express route extraction
+│   ├── testGenerator.ts      # Claude test generation
+│   └── testRunner.ts         # axios execution
+├── patcher/
+│   ├── bugFixer.ts           # Claude patch generation
+│   ├── applyPatch.ts         # Write to disk
+│   └── retryLoop.ts          # Re-test with max N retries
+├── trigger/
+│   ├── fileWatcher.ts        # chokidar
+│   └── webhookServer.ts      # Express POST /webhook/ci
+└── utils/
+    ├── config.ts             # zod env validation
+    ├── types.ts              # Shared interfaces
+    └── logger.ts             # pino
+```
+
+**Rules:**
+- New files MUST land in the correct directory. No `src/shared/` — use `src/utils/`.
+- Cross-layer imports: `orchestrator` may import all layers; layers must NOT import `orchestrator`.
+- `utils/` is imported by any layer; `utils/` must NOT import ui/api/patcher/trigger.
+
+---
+
+## 4. Coding Standards
+
+### TypeScript
+- `strict: true` — no `any` unless justified with inline comment.
+- Explicit return types on all exported functions.
+- Prefer `async/await` over raw Promise chains.
+
+### Naming
+| Kind | Convention | Example |
+|------|------------|---------|
+| Files | camelCase | `pixelDiff.ts` |
+| Functions/vars | camelCase | `captureScreenshot` |
+| Types/Interfaces | PascalCase | `TestCase`, `BugReport` |
+| Constants | SCREAMING_SNAKE | `PIXEL_THRESHOLD` |
+
+### Error Handling
+- Validate env at startup via zod in `config.ts` — exit with descriptive message if missing.
+- Never swallow errors silently.
+- Retry logic lives in `patcher/retryLoop.ts` only.
+
+---
+
+## 5. Critical Implementation Rules
+
+These MUST be implemented exactly as specified:
+
+| Rule | Detail |
+|------|--------|
+| **Pixel threshold** | 2% mismatch ratio. Below → ignore. Above → semantic diff + patching. |
+| **pixelmatch config** | `threshold: 0.1`, `includeAA: false` |
+| **Playwright viewport** | 1440×900, `networkidle`, viewport screenshot (not full-page) |
+| **axios validateStatus** | `validateStatus: () => true` — never throw on 4xx/5xx |
+| **axios timeout** | 10 seconds per request |
+| **No automatic PRs** | On `'fixed'`, log success only — do **not** commit, push, or open PRs |
+| **Context enrichment** | Each failed patch appends failed file content to `bug.context` before next Claude call |
+| **Claude patch output** | Full corrected file only — no diff, no markdown fences, no explanation |
+| **Figma node IDs** | Convert URL format `1-23` → API format `1:23` |
+| **File watcher debounce** | 2 seconds via chokidar |
+| **Webhook response** | Return `202 Accepted` immediately; run QA cycle async |
+
+---
+
+## 6. Environment Variables
+
+**Required** at startup (validation fails + exit 1 if missing):
+
+```
+OPENROUTER_API_KEY, OPENROUTER_MODEL, ROUTES_DIR
+```
+
+**Optional with feature flags** (missing/empty is OK — check `hasFigma` / `hasGit` on loaded config):
+
+```
+FIGMA_API_TOKEN, FIGMA_FILE_KEY  →  config.hasFigma
+GITHUB_TOKEN                     →  config.hasGit
+```
+
+**Optional with defaults:**
+
+```
+BASE_APP_URL (default http://localhost:3000), MAX_PATCH_RETRIES (default 3)
+```
+
+Never commit `.env`. Never log secrets.
+
+---
+
+## 7. AI Agent Operational Rules
+
+### Session Start
+1. Read `.cursor/memory/activeContext.md`
+2. Read `.cursor/memory/progress.md`
+3. Read `.cursor/memory/systemPatterns.md` before adding files or abstractions
+4. Consult `.cursor/memory/systemArchitecture.md` before structural changes
+
+### Before Writing Code
+- Confirm task maps to a pending item in `progress.md`
+- Implement layer-by-layer: utils → ui → api → patcher → trigger → orchestrator → index
+
+### After Completing Work
+- Update `progress.md` and `activeContext.md`
+- Do **not** commit unless user explicitly requests
+
+### Forbidden Without Approval
+- Adding npm dependencies beyond approved stack
+- Modifying target app source outside patcher flow
+- Automatic git operations (commit, push, PR creation)
+
+---
+
+## 8. Self-Review Checklist
+
+- [ ] Code in correct directory per project structure
+- [ ] No cross-layer violations (utils stays dependency-free of features)
+- [ ] Env validated via zod; no raw `process.env` outside config.ts
+- [ ] Critical implementation rules (§5) respected
+- [ ] No automatic PR or git push logic
+- [ ] Memory bank updated if scope or architecture changed
+- [ ] KISS: anything removable without losing behavior?
+
+---
+
+*Last updated: 2026-06-02 — Removed automatic GitHub PR creation.*

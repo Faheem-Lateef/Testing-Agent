@@ -1,0 +1,38 @@
+{
+  "name": "qa-agent",
+  "version": "0.1.0",
+  "description": "Autonomous full-stack QA agent — visual regression, API testing, self-healing patches",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "run": "tsx src/index.ts run",
+    "watch": "tsx src/index.ts watch",
+    "webhook": "tsx src/index.ts webhook",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "chokidar": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^4.104.0",
+    "pino": "^9.6.0",
+    "pixelmatch": "^6.0.0",
+    "playwright": "^1.50.1",
+    "pngjs": "^7.0.0",
+    "simple-git": "^3.36.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "@types/pixelmatch": "^5.2.6",
+    "@types/pngjs": "^6.0.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
