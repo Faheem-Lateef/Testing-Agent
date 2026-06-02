@@ -3,6 +3,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
+import OpenAI from 'openai';
+
 import {
   createOpenRouterClient,
   extractCompletionText,
@@ -141,6 +143,10 @@ Respond with pure JSON only — no markdown fences:
       messages: [{ role: 'user', content: prompt }],
     });
   } catch (err) {
+    if (err instanceof OpenAI.APIError && err.status === 402) {
+      evolutionLog('OpenRouter credits exhausted — skipping meta-review');
+      return { gaps: [], patches: [] };
+    }
     handleOpenRouterAuthError(err);
   }
 

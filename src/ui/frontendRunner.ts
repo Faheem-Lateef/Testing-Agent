@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import OpenAI from 'openai';
 import { chromium, type Browser, type Locator, type Page } from 'playwright';
 
 import {
@@ -42,6 +43,15 @@ function stripMarkdownFences(text: string): string {
   return text.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
 }
 
+function fallbackCredentials(): GeneratedCredentials {
+  const stamp = Date.now();
+  return {
+    email: `qa-e2e-${stamp}@example.com`,
+    password: 'TestPass123!',
+    name: 'QA E2E User',
+  };
+}
+
 async function generateCredentials(): Promise<GeneratedCredentials> {
   const config = loadConfig();
   const openai = createOpenRouterClient(config);
@@ -62,6 +72,10 @@ Use a realistic email like qa-user-<random>@example.com and password at least 10
       ],
     });
   } catch (err) {
+    if (err instanceof OpenAI.APIError && err.status === 402) {
+      logger.warn('OpenRouter credits exhausted — using local fallback credentials for E2E');
+      return fallbackCredentials();
+    }
     handleOpenRouterAuthError(err);
   }
 

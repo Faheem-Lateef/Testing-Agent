@@ -27,6 +27,8 @@ function fullPath(mount: string, routePath: string, session: NonNullable<ReturnT
     suffix = suffix.replace(':id', session.userId);
   } else if (suffix.includes(':productId')) {
     suffix = suffix.replace(':productId', session.productId);
+  } else if (suffix.includes(':status')) {
+    suffix = suffix.replace(':status', 'Processing');
   } else if (suffix.includes(':id') && mount === 'orders' && routePath.includes('/my/')) {
     suffix = suffix.replace(':id', session.orderId);
   } else if (suffix.includes(':id') && mount === 'orders') {
