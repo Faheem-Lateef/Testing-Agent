@@ -29,6 +29,7 @@ import { runDiscoverCommand } from './discover.js';
 import { startFileWatcher } from './trigger/fileWatcher.js';
 import { startWebhookServer } from './trigger/webhookServer.js';
 import { prepareEnvironment } from './utils/prepareEnvironment.js';
+import { resolveAgentRoot } from './utils/agentRoot.js';
 import { loadConfig } from './utils/config.js';
 import { logger } from './utils/logger.js';
 import {
@@ -90,9 +91,9 @@ async function verifyBackendConnection(baseUrl: string): Promise<boolean> {
 
 async function executeBackend(): Promise<void> {
   printPhaseHeader('BACKEND', 'Route discovery · AI payload generation · Axios execution matrix');
-  loadConfig();
   let success = false;
   try {
+    loadConfig();
     await runApiPhase();
     success = true;
     printSuccess('Backend API phase complete');
@@ -102,6 +103,7 @@ async function executeBackend(): Promise<void> {
       featureSpec: 'Backend API test suite',
       success,
       finalState: success ? 'COMPLETED' : 'FAILED',
+      qaAgentRoot: resolveAgentRoot(),
     });
   }
 }
@@ -109,9 +111,9 @@ async function executeBackend(): Promise<void> {
 async function executeFrontend(): Promise<void> {
   const { runFrontendE2eSweep } = await import('./ui/frontendRunner.js');
   printPhaseHeader('FRONTEND', 'Playwright browser · UI simulation · visual regression');
-  loadConfig();
   let success = false;
   try {
+    loadConfig();
     const result = await runFrontendE2eSweep();
     success = result.passed;
     printSuccess(`Frontend E2E complete — ${result.stepsCompleted} step(s)`);
@@ -127,6 +129,7 @@ async function executeFrontend(): Promise<void> {
       featureSpec: 'Frontend E2E sweep',
       success,
       finalState: success ? 'COMPLETED' : 'FAILED',
+      qaAgentRoot: resolveAgentRoot(),
     });
   }
 }
@@ -134,18 +137,18 @@ async function executeFrontend(): Promise<void> {
 async function executeFullStack(): Promise<void> {
   printPhaseHeader('FULL-STACK', 'Boot check · Playwright · API intercept · FSM self-healing');
 
-  const config = loadConfig();
-  printInfo(`Verifying backend at ${pc.bold(config.BASE_APP_URL)} …`);
-
-  const alive = await verifyBackendConnection(config.BASE_APP_URL);
-  if (alive) {
-    printSuccess('Backend server reachable');
-  } else {
-    printWarning(`Backend did not respond at ${config.BASE_APP_URL} — tests will attempt anyway`);
-  }
-
   let success = false;
   try {
+    const config = loadConfig();
+    printInfo(`Verifying backend at ${pc.bold(config.BASE_APP_URL)} …`);
+
+    const alive = await verifyBackendConnection(config.BASE_APP_URL);
+    if (alive) {
+      printSuccess('Backend server reachable');
+    } else {
+      printWarning(`Backend did not respond at ${config.BASE_APP_URL} — tests will attempt anyway`);
+    }
+
     await runFullQACycle();
     success = true;
     printSuccess('Full-stack QA cycle complete');
@@ -155,6 +158,7 @@ async function executeFullStack(): Promise<void> {
       featureSpec: 'Full-stack QA cycle (backend + frontend + self-evolution)',
       success,
       finalState: success ? 'COMPLETED' : 'FAILED',
+      qaAgentRoot: resolveAgentRoot(),
     });
   }
 }
@@ -165,14 +169,18 @@ async function executeEngineer(featureSpec: string, workspacePath?: string): Pro
   console.log('');
 
   // Resolve and confirm the external sandbox path before any code is written
-  const qaAgentRoot = process.cwd();
+  const qaAgentRoot = resolveAgentRoot();
   const defaultSandbox = resolveSandbox(qaAgentRoot, {
     projectRoot: workspacePath,
     featureSpec,
   });
 
-  // Show the resolved path and let the user confirm / override it
-  const confirmedPath = await promptProjectWorkspace(defaultSandbox.projectRoot);
+  // Skip interactive prompt when workspace was passed on CLI or env
+  const skipPrompt =
+    Boolean(workspacePath) || process.env['SKIP_WORKSPACE_PROMPT'] === '1';
+  const confirmedPath = skipPrompt
+    ? defaultSandbox.projectRoot
+    : await promptProjectWorkspace(defaultSandbox.projectRoot);
   const finalSandbox = confirmedPath !== defaultSandbox.projectRoot
     ? resolveSandbox(qaAgentRoot, { projectRoot: confirmedPath, featureSpec })
     : defaultSandbox;
@@ -268,7 +276,7 @@ async function main(): Promise<void> {
 
   // ── 1. Sync cold-boot memory read ────────────────────────────────────────
   if (parsed.command !== 'discover') {
-    loadMemoryBankSync(process.cwd());
+    loadMemoryBankSync(resolveAgentRoot());
   }
 
   // ── 2. AI model default fallback ─────────────────────────────────────────

@@ -97,6 +97,22 @@ function parseJsonRecord(raw: string, label: string): FigmaRouteMap {
   }
 }
 
+export class ConfigFatalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigFatalError';
+  }
+}
+
+export class AIProviderAuthError extends Error {
+  readonly status?: number;
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'AIProviderAuthError';
+    this.status = status;
+  }
+}
+
 export function loadConfig(): AppConfig {
   if (cached) return cached;
 
@@ -108,24 +124,21 @@ export function loadConfig(): AppConfig {
       const field = issue.path.join('.') || 'unknown';
       logger.error({ field, message: issue.message }, `Invalid or missing environment variable: ${field}`);
     }
-    logger.fatal('Environment validation failed — check .env against .env.example');
-    process.exit(1);
+    throw new ConfigFatalError('Environment validation failed — check .env against .env.example');
   }
 
   if (!resolveApiKeyFromEnv()) {
-    logger.fatal(
+    throw new ConfigFatalError(
       'No AI API key found. Set AI_API_KEY (auto-detects provider) or OPENROUTER_API_KEY, ' +
         'GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GROQ_API_KEY',
     );
-    process.exit(1);
   }
 
   let providerProfile: ProviderProfile;
   try {
     providerProfile = resolveProviderProfile();
   } catch (err) {
-    logger.fatal({ err }, String(err));
-    process.exit(1);
+    throw new ConfigFatalError(err instanceof Error ? err.message : String(err));
   }
 
   const aiModel = getActiveModelFromEnv(providerProfile);
@@ -184,6 +197,10 @@ export function createOpenRouterClient(config: AppConfig): OpenAI {
   return createAIClient(config.providerProfile) as unknown as OpenAI;
 }
 
+/**
+ * Rethrows auth failures as AIProviderAuthError so callers can run finally/cleanup.
+ * Never calls process.exit — that would skip memory-bank finalization.
+ */
 export function handleOpenRouterAuthError(err: unknown): never {
   const status =
     err instanceof OpenAI.APIError
@@ -197,7 +214,10 @@ export function handleOpenRouterAuthError(err: unknown): never {
       { status },
       'Fatal auth error — check your API key (AI_API_KEY or provider-specific key in .env)',
     );
-    process.exit(1);
+    throw new AIProviderAuthError(
+      'AI provider auth failed — check your API key in .env',
+      status,
+    );
   }
   throw err;
 }

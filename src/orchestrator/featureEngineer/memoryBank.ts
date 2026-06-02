@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { readFileSync, mkdirSync, appendFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
+import { resolveAgentRoot } from '../../utils/agentRoot.js';
 import { memoryLog } from './logging.js';
 import type { FileChangeRecord, HealCycleRecord, ProjectMemoryBank } from './types.js';
 
@@ -524,15 +525,20 @@ export function refreshProjectContextHeader(
  * stamp activeContext header in memory-bank/ AND .cursor/memory/.
  */
 export async function finalizeAgentMemoryUpdate(params: ProgressLogParams): Promise<void> {
-  const root = params.qaAgentRoot ?? process.cwd();
+  const root = params.qaAgentRoot ?? resolveAgentRoot();
   ensureAgentMemoryBankFiles(root);
-  await writeProgressLog(params);
+  await writeProgressLog({ ...params, qaAgentRoot: root });
   refreshActiveContextHeader(
     root,
     params.featureSpec,
     params.success ? 'SUCCESS' : 'FAILED',
     params.finalState,
   );
+  for (const dir of MEMORY_WRITE_DIRS) {
+    const base = resolveWriteDir(root, dir);
+    memoryLog(`[MEMORY-BANK] Updated ${path.join(base, 'progress.md')}`);
+    memoryLog(`[MEMORY-BANK] Updated ${path.join(base, 'activeContext.md')}`);
+  }
 }
 
 /**
@@ -572,7 +578,7 @@ export interface ProgressLogParams {
  * Prints the canonical "💾 [MEMORY-BANK]" log line on success.
  */
 export async function writeProgressLog(params: ProgressLogParams): Promise<void> {
-  const root = params.qaAgentRoot ?? process.cwd();
+  const root = params.qaAgentRoot ?? resolveAgentRoot();
   ensureAgentMemoryBankFiles(root);
 
   const changes = params.fileChanges ?? [];

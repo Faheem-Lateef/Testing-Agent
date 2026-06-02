@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { resolveAgentRoot } from '../utils/agentRoot.js';
 import { loadConfig, resetConfigCache } from '../utils/config.js';
 import {
   formatCompileFailures,
@@ -71,7 +72,8 @@ function mergeChanges(target: FileChangeRecord[], incoming: FileChangeRecord[]):
 export async function runFeatureEngineer(
   options: FeatureEngineerOptions,
 ): Promise<FeatureEngineerResult> {
-  const qaAgentRoot = process.cwd();
+  const qaAgentRoot = resolveAgentRoot();
+  engineerLog(`[MEMORY-BANK] Agent root → ${qaAgentRoot}`);
 
   // ── STEP 0: Sync cold-boot memory read (agent's own context) ─────────────
   // readFileSync — guaranteed before any async I/O or LLM calls.
@@ -117,7 +119,6 @@ export async function runFeatureEngineer(
     engineerLog(`[EXTERNAL-SANDBOX] Scaffold complete — ${backendRoot} | ${frontendRoot}`);
   }
 
-  loadConfig();
   const frontendAppUrl = 'http://localhost:5173';
   const fileChanges: FileChangeRecord[] = [];
   const healCycles: HealCycleRecord[] = [];
@@ -135,6 +136,7 @@ export async function runFeatureEngineer(
   // Wrap the ENTIRE lifecycle in try/finally so writeProgressLog is called
   // 100% of the time — whether the run succeeds, fails, or throws.
   try {
+    loadConfig();
 
     fsm.transition('READING_CONTEXT', 'Memory bank + repository analysis');
 
@@ -408,6 +410,26 @@ export async function runFeatureEngineer(
 
     return result;
 
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    engineerLog(`[FEATURE-ENGINEER] Run error: ${msg}`);
+    if (!result) {
+      result = {
+        finalState: fsm.current,
+        phase: currentPhase,
+        fileChanges,
+        generatedTestPath,
+        testMilestones,
+        healCycles,
+        compileAttempts: compileAttemptCount,
+        healAttempts: MAX_HEAL_ATTEMPTS,
+        attempts: compileAttempts,
+        memoryBank: syncMemory,
+        engineeringReport: `Run aborted: ${msg}`,
+        projectRoot: sandbox.projectRoot,
+        diagnosticReport: `Run aborted: ${msg}`,
+      };
+    }
   } finally {
     // ── GUARANTEED FINALIZATION ────────────────────────────────────────────
     // Both the EXTERNAL project memory-bank/ AND the agent's own memory dirs
@@ -430,4 +452,23 @@ export async function runFeatureEngineer(
     // Agent memory (memory-bank/ + .cursor/memory/ — always both)
     await finalizeAgentMemoryUpdate({ ...sharedParams, qaAgentRoot });
   }
+
+  if (!result) {
+    result = {
+      finalState: fsm.current,
+      phase: currentPhase,
+      fileChanges,
+      generatedTestPath,
+      testMilestones,
+      healCycles,
+      compileAttempts: compileAttemptCount,
+      healAttempts: MAX_HEAL_ATTEMPTS,
+      attempts: compileAttempts,
+      memoryBank: syncMemory,
+      engineeringReport: 'Run ended without a result object',
+      projectRoot: sandbox.projectRoot,
+      diagnosticReport: 'Run ended without a result object',
+    };
+  }
+  return result;
 }
