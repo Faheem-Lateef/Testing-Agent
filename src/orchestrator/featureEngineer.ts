@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { loadConfig } from '../utils/config.js';
+import { loadConfig, resetConfigCache } from '../utils/config.js';
 import {
   formatCompileFailures,
   gitRollbackWorkspace,
@@ -13,7 +13,15 @@ import {
   loadMemoryBankSync,
   loadProjectMemoryBank,
   writeProgressLog,
+  checkMemoryDrift,
+  refreshActiveContextHeader,
 } from './featureEngineer/memoryBank.js';
+import { detectAgentDuplicates } from './featureEngineer/duplicateDetector.js';
+import {
+  scaffoldWorkspaceIfBlank,
+  DEFAULT_BACKEND_URL,
+  DEFAULT_FRONTEND_URL,
+} from './featureEngineer/projectScaffolder.js';
 import { runFullStackDevelopmentPhase, runSelfHealAnalysisPhase } from './featureEngineer/openRouterPhases.js';
 import { applyDevelopmentFiles, applyHealFix } from './featureEngineer/phase1Development.js';
 import { generateFeatureTest } from './featureEngineer/phase2TestGen.js';
@@ -106,8 +114,45 @@ export async function runFeatureEngineer(
   const qaAgentRoot = process.cwd();
   const syncMemory = loadMemoryBankSync(qaAgentRoot);
 
+  // ── STEP 1: Inject URL/path defaults before any loadConfig() call ────────
+  // This guarantees blank-canvas runs never crash on missing ROUTES_DIR.
+  const defaultBackendPath = path.resolve(qaAgentRoot, 'backend demo', 'ecommerce-backend');
+  const defaultFrontendPath = path.resolve(qaAgentRoot, 'backend demo', 'ecommerce-frontend');
+
+  if (!process.env['ROUTES_DIR']?.trim()) {
+    const routesCandidate = path.join(options.backendRoot ?? defaultBackendPath, 'src', 'routes');
+    process.env['ROUTES_DIR'] = routesCandidate;
+    engineerLog(`[BLANK-CANVAS] ROUTES_DIR → ${routesCandidate}`);
+  }
+  if (!process.env['BASE_APP_URL']?.trim()) {
+    process.env['BASE_APP_URL'] = DEFAULT_BACKEND_URL;
+    engineerLog(`[BLANK-CANVAS] BASE_APP_URL → ${DEFAULT_BACKEND_URL}`);
+  }
+  if (!process.env['FRONTEND_APP_URL']?.trim()) {
+    process.env['FRONTEND_APP_URL'] = DEFAULT_FRONTEND_URL;
+    engineerLog(`[BLANK-CANVAS] FRONTEND_APP_URL → ${DEFAULT_FRONTEND_URL}`);
+  }
+  if (!process.env['GIT_REPO_ROOT']?.trim()) {
+    process.env['GIT_REPO_ROOT'] = options.backendRoot ?? defaultBackendPath;
+    engineerLog(`[BLANK-CANVAS] GIT_REPO_ROOT → ${process.env['GIT_REPO_ROOT']}`);
+  }
+  // Reset cache so loadConfig() picks up the injected defaults
+  resetConfigCache();
+
   const fsm = new FeatureEngineerFsm();
   const roots = await resolveWorkspaceRoots(options);
+
+  // ── STEP 2: Dynamic project scaffolding (mkdirSync + baseline files) ─────
+  // Creates backend/frontend directory trees and installs the TypeScript
+  // toolchain so the compilation sandbox never throws ENOENT on a blank run.
+  const scaffold = scaffoldWorkspaceIfBlank(roots.backendRoot, roots.frontendRoot);
+  if (scaffold.isBlankCanvas) {
+    // Re-inject ROUTES_DIR with the confirmed backend root after scaffold
+    process.env['ROUTES_DIR'] = path.join(roots.backendRoot, 'src', 'routes');
+    resetConfigCache();
+    engineerLog(`[BLANK-CANVAS] Scaffold complete — backend: ${roots.backendRoot} | frontend: ${roots.frontendRoot}`);
+  }
+
   const config = loadConfig();
   const fileChanges: FileChangeRecord[] = [];
   const healCycles: HealCycleRecord[] = [];
@@ -127,9 +172,25 @@ export async function runFeatureEngineer(
   try {
 
     fsm.transition('READING_CONTEXT', 'Memory bank + repository analysis');
-    // Async pass augments the sync snapshot with any additional memory files
-    const memoryBank = await loadProjectMemoryBank(roots.qaAgentRoot) ?? syncMemory;
+
+    // Run memory drift check and duplicate file scan in parallel before
+    // any generation — catching stale/diverged context before the LLM sees it.
+    const [memoryBank, , dupReport] = await Promise.all([
+      loadProjectMemoryBank(roots.qaAgentRoot).then((mb) => mb ?? syncMemory),
+      checkMemoryDrift(roots.qaAgentRoot),
+      detectAgentDuplicates(roots.qaAgentRoot),
+    ]);
+
+    if (!dupReport.clean) {
+      engineerLog(
+        `⚠ Workspace has ${dupReport.totalIssues} duplicate file issue(s) — ` +
+        `review [DUPLICATE-DETECTOR] log above before proceeding`,
+      );
+    }
+
     const repo = await analyzeRepositories(roots.backendRoot, roots.frontendRoot);
+    // Merge scaffold detection with repo analysis for coherent blank-canvas flag
+    const isBlankCanvas = scaffold.isBlankCanvas || repo.isBlankCanvas;
 
     // ─── PHASE 1: FULL-STACK DEVELOPMENT ─────────────────────────────────
     phaseLog('PHASE_1_DEVELOPMENT', 'The Developer — generate & inject application code');
@@ -146,6 +207,7 @@ export async function runFeatureEngineer(
         memoryBank,
         repo.summary,
         priorErrors,
+        isBlankCanvas,
       );
 
       const applied = await applyDevelopmentFiles(roots.backendRoot, roots.frontendRoot, dev);
@@ -380,18 +442,30 @@ export async function runFeatureEngineer(
     return result;
 
   } finally {
-    // ── GUARANTEED FINALIZATION: always write the progress log ────────────
-    // This block executes whether the try completes normally, returns early,
-    // or throws an unhandled exception — so no run is ever left unrecorded.
+    // ── GUARANTEED FINALIZATION ────────────────────────────────────────────
+    // Both calls below execute whether the try completes, returns early, or
+    // throws — so no run is ever left unrecorded and no memory file goes stale.
+    const succeeded = result?.finalState === 'COMPLETED';
+    const finalState = result?.finalState ?? fsm.current;
+
+    // 1. Append full run record to progress.md in BOTH memory locations
     await writeProgressLog({
       commandType: 'feature-engineer',
       featureSpec: options.featureSpec,
-      success: result?.finalState === 'COMPLETED',
-      finalState: result?.finalState ?? fsm.current,
+      success: succeeded,
+      finalState,
       fileChanges: result?.fileChanges ?? fileChanges,
       healCycles: result?.healCycles ?? healCycles,
       generatedTestPath: result?.generatedTestPath ?? generatedTestPath,
       qaAgentRoot,
     });
+
+    // 2. Stamp "Last updated" + "Last run" header in activeContext.md in BOTH locations
+    refreshActiveContextHeader(
+      qaAgentRoot,
+      options.featureSpec,
+      succeeded ? 'SUCCESS' : 'FAILED',
+      finalState,
+    );
   }
 }

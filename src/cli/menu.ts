@@ -7,13 +7,16 @@
 import { select, confirm } from '@inquirer/prompts';
 import pc from 'picocolors';
 
+import { getActiveModel } from './modelConfig.js';
+
 // ─── Intent types ─────────────────────────────────────────────────────────────
 
 export type TestingIntent =
   | 'backend'
   | 'frontend'
   | 'fullstack'
-  | 'engineer';
+  | 'engineer'
+  | 'switch-model';
 
 interface IntentChoice {
   name: string;
@@ -21,28 +24,36 @@ interface IntentChoice {
   description: string;
 }
 
-const CHOICES: IntentChoice[] = [
-  {
-    value: 'backend',
-    name: `${pc.cyan('①')}  ${pc.bold('Backend API Testing Only')}`,
-    description: pc.dim('Route discovery · AI payload gen · Axios execution matrix · self-healing patches'),
-  },
-  {
-    value: 'frontend',
-    name: `${pc.magenta('②')}  ${pc.bold('Frontend E2E UI Testing Only')}`,
-    description: pc.dim('Playwright browser · form simulation · visual regression · component sweep'),
-  },
-  {
-    value: 'fullstack',
-    name: `${pc.green('③')}  ${pc.bold('Full-Stack E2E Flow')} ${pc.dim('(Recommended)')}`,
-    description: pc.dim('Backend + Frontend + network intercept + FSM self-healing + self-evolution loop'),
-  },
-  {
-    value: 'engineer',
-    name: `${pc.yellow('④')}  ${pc.bold('Feature Engineer')}`,
-    description: pc.dim('Autonomous Dev → dynamic Playwright test → 4-cycle self-heal → engineering report'),
-  },
-];
+function buildChoices(): IntentChoice[] {
+  const activeModel = getActiveModel();
+  return [
+    {
+      value: 'backend',
+      name: `${pc.cyan('①')}  ${pc.bold('Backend API Testing Only')}`,
+      description: pc.dim('Route discovery · AI payload gen · Axios execution matrix · self-healing patches'),
+    },
+    {
+      value: 'frontend',
+      name: `${pc.magenta('②')}  ${pc.bold('Frontend E2E UI Testing Only')}`,
+      description: pc.dim('Playwright browser · form simulation · visual regression · component sweep'),
+    },
+    {
+      value: 'fullstack',
+      name: `${pc.green('③')}  ${pc.bold('Full-Stack E2E Flow')} ${pc.dim('(Recommended)')}`,
+      description: pc.dim('Backend + Frontend + network intercept + FSM self-healing + self-evolution loop'),
+    },
+    {
+      value: 'engineer',
+      name: `${pc.yellow('④')}  ${pc.bold('Feature Engineer')}`,
+      description: pc.dim('Autonomous Dev → dynamic Playwright test → 4-cycle self-heal → engineering report'),
+    },
+    {
+      value: 'switch-model',
+      name: `${pc.white('⚙️')}  ${pc.bold('Switch Active AI Model')}  ${pc.dim(`current: ${activeModel}`)}`,
+      description: pc.dim('Hot-swap OpenRouter model before running — selection saved to .env'),
+    },
+  ];
+}
 
 // ─── Argument parsing ─────────────────────────────────────────────────────────
 
@@ -94,14 +105,16 @@ export async function promptTestingIntent(): Promise<TestingIntent> {
     pc.bold(pc.white('\n  Which testing flow would you like to execute today?\n')),
   );
 
+  const choices = buildChoices();
+
   const intent = await select<TestingIntent>({
     message: 'Select mode',
-    choices: CHOICES.map(({ value, name, description }) => ({
+    choices: choices.map(({ value, name, description }) => ({
       value,
       name,
       description,
     })),
-    pageSize: CHOICES.length,
+    pageSize: choices.length,
   });
 
   return intent;
@@ -127,14 +140,16 @@ export async function promptConfirmFullStack(): Promise<boolean> {
 // ─── Summary printers ─────────────────────────────────────────────────────────
 
 export function printIntentBadge(intent: TestingIntent): void {
-  const BADGES: Record<TestingIntent, string> = {
+  if (intent === 'switch-model') return; // handled separately
+
+  const BADGES: Record<Exclude<TestingIntent, 'switch-model'>, string> = {
     backend:    pc.bgCyan(pc.black(pc.bold('  BACKEND API  '))),
     frontend:   pc.bgMagenta(pc.black(pc.bold('  FRONTEND E2E  '))),
     fullstack:  pc.bgGreen(pc.black(pc.bold('  FULL-STACK E2E  '))),
     engineer:   pc.bgYellow(pc.black(pc.bold('  FEATURE ENGINEER  '))),
   };
 
-  const SUBTITLES: Record<TestingIntent, string> = {
+  const SUBTITLES: Record<Exclude<TestingIntent, 'switch-model'>, string> = {
     backend:   'Route parsing · AI payloads · Axios execution',
     frontend:  'Playwright UI simulation · visual regression',
     fullstack: 'Unified journey: backend + frontend + FSM healing',

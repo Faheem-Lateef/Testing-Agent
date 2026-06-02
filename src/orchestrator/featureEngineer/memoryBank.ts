@@ -1,9 +1,37 @@
 import fs from 'node:fs/promises';
-import { readFileSync, mkdirSync, appendFileSync } from 'node:fs';
+import { readFileSync, mkdirSync, appendFileSync, writeFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
 import { memoryLog } from './logging.js';
 import type { FileChangeRecord, HealCycleRecord, ProjectMemoryBank } from './types.js';
+
+// ─── Canonical write targets ───────────────────────────────────────────────────
+// Every memory-write operation MUST update ALL of these directories so that
+// loadMemoryBankSync() never reads a mix of current + stale context.
+const MEMORY_WRITE_DIRS = ['memory-bank', '.cursor/memory'] as const;
+
+function resolveWriteDir(cwd: string, dir: string): string {
+  return path.join(cwd, dir);
+}
+
+/** Append `content` to `filename` in every canonical memory location. */
+function appendToAllMemoryDirs(cwd: string, filename: string, content: string): void {
+  for (const dir of MEMORY_WRITE_DIRS) {
+    const dirPath = resolveWriteDir(cwd, dir);
+    mkdirSync(dirPath, { recursive: true });
+    appendFileSync(path.join(dirPath, filename), content, 'utf-8');
+  }
+}
+
+/** Overwrite `filename` in every canonical memory location (for full syncs). */
+export function syncToAllMemoryDirs(cwd: string, filename: string, content: string): void {
+  for (const dir of MEMORY_WRITE_DIRS) {
+    const dirPath = resolveWriteDir(cwd, dir);
+    mkdirSync(dirPath, { recursive: true });
+    writeFileSync(path.join(dirPath, filename), content, 'utf-8');
+  }
+  memoryLog(`Synced ${filename} → [${MEMORY_WRITE_DIRS.join(', ')}]`);
+}
 
 const MEMORY_CANDIDATES = [
   '.cursorrules',
@@ -79,10 +107,42 @@ function buildMemoryBank(sourcePath: string, rawContent: string): ProjectMemoryB
 }
 
 /**
+ * Detects when memory files in different locations have drifted out of sync
+ * (e.g. memory-bank/activeContext.md vs .cursor/memory/activeContext.md).
+ * Logs a warning for each drift pair — does NOT auto-merge (use syncToAllMemoryDirs).
+ */
+export async function checkMemoryDrift(cwd: string = process.cwd()): Promise<void> {
+  const sharedFiles = ['activeContext.md', 'progress.md'];
+  for (const filename of sharedFiles) {
+    const contents: string[] = [];
+    const found: string[] = [];
+    for (const dir of MEMORY_WRITE_DIRS) {
+      const p = path.join(cwd, dir, filename);
+      if (existsSync(p)) {
+        try {
+          contents.push(readFileSync(p, 'utf-8').trim());
+          found.push(`${dir}/${filename}`);
+        } catch { /* skip */ }
+      }
+    }
+    if (found.length > 1) {
+      const allSame = contents.every((c) => c === contents[0]);
+      if (!allSame) {
+        memoryLog(
+          `⚠ DRIFT DETECTED in ${filename} — locations have diverged: [${found.join(', ')}]. ` +
+          `Call syncToAllMemoryDirs() to re-align.`,
+        );
+      }
+    }
+  }
+}
+
+/**
  * Load unified project memory before any code generation.
  */
 export async function loadProjectMemoryBank(cwd: string = process.cwd()): Promise<ProjectMemoryBank> {
   memoryLog('Searching for architectural knowledge base files…');
+  await checkMemoryDrift(cwd);
 
   const chunks: string[] = [];
   let primarySource = '(none)';
@@ -172,6 +232,59 @@ export function loadMemoryBankSync(cwd: string = process.cwd()): ProjectMemoryBa
   return bank;
 }
 
+// ─── Active context header auto-stamp ────────────────────────────────────────
+
+/**
+ * Updates the "Last updated" and "Last run" header lines in activeContext.md
+ * across BOTH canonical memory locations after every run.
+ *
+ * Only touches the metadata header — the architectural body is left intact.
+ * Safe to call in `finally` blocks (uses sync fs).
+ */
+export function refreshActiveContextHeader(
+  cwd: string,
+  featureSpec: string,
+  outcome: 'SUCCESS' | 'FAILED',
+  finalState: string,
+): void {
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const specSnippet = featureSpec.slice(0, 80);
+  const runLine = `Last run: "${specSnippet}" → ${outcome} (${finalState})`;
+
+  for (const dir of MEMORY_WRITE_DIRS) {
+    const filePath = path.join(cwd, dir, 'activeContext.md');
+    try {
+      let content = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
+
+      // Update or insert "Last updated:" line
+      if (/\*\*Last updated:\*\*|> \*\*Last updated:\*\*|Last updated:/i.test(content)) {
+        content = content.replace(
+          /(\*\*Last updated:\*\*|> \*\*Last updated:\*\*|Last updated:)[^\n]*/i,
+          `> **Last updated:** ${timestamp}`,
+        );
+      }
+
+      // Update or insert "Last run:" line after the Last updated line
+      if (/Last run:/i.test(content)) {
+        content = content.replace(/Last run:[^\n]*/i, runLine);
+      } else {
+        // Inject after the first "Last updated" line
+        content = content.replace(
+          /(> \*\*Last updated:\*\*[^\n]*\n)/,
+          `$1> ${runLine}\n`,
+        );
+      }
+
+      mkdirSync(path.join(cwd, dir), { recursive: true });
+      writeFileSync(filePath, content, 'utf-8');
+    } catch {
+      // Non-fatal — header stamp is best-effort
+    }
+  }
+
+  memoryLog(`Active context header stamped → ${timestamp} | ${outcome}`);
+}
+
 // ─── Progress log writer ──────────────────────────────────────────────────────
 
 export interface ProgressLogParams {
@@ -258,11 +371,11 @@ export async function writeProgressLog(params: ProgressLogParams): Promise<void>
   const entry = lines.join('\n') + '\n';
 
   try {
-    // mkdirSync for guaranteed creation even in tight finally blocks
-    mkdirSync(dir, { recursive: true });
-    appendFileSync(logPath, entry, 'utf-8');
+    // Write to EVERY canonical memory location so all dirs stay in sync.
+    // mkdirSync used here for guaranteed creation even inside finally blocks.
+    appendToAllMemoryDirs(root, 'progress.md', entry);
     console.log('💾 [MEMORY-BANK] Progress log updated automatically on disk.');
-    memoryLog(`Progress appended → ${path.relative(root, logPath)}`);
+    memoryLog(`Progress appended → [${MEMORY_WRITE_DIRS.join(', ')}]/progress.md`);
   } catch (err) {
     console.warn(`⚠  [MEMORY-BANK] Could not write progress log: ${String(err)}`);
   }

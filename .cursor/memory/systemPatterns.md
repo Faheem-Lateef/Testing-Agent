@@ -1,8 +1,7 @@
-# System Patterns & Anti-Bloat Guidelines
+# System Patterns — QA Feature Engineer Agent
 
 > **Purpose:** Keep the codebase compact, modular, and free of unnecessary abstraction.
 > **Last updated:** 2026-06-02
-> **Read with:** `systemArchitecture.md` (structure) · `productContext.md` (scope)
 
 ---
 
@@ -14,179 +13,139 @@ The agent is a **pipeline of stateless functions** coordinated by a single **Orc
 
 ---
 
-## 2. Code Condensation Principles
+## 2. Memory Bank Pattern
+
+### The two-location rule (MANDATORY)
+Every memory write MUST go to BOTH canonical locations:
+- `memory-bank/` (repo root)
+- `.cursor/memory/` (Cursor IDE)
+
+**Never write to only one.** `loadMemoryBankSync()` reads both — stale content in either
+location corrupts the LLM context for every subsequent run.
+
+```typescript
+// ✅ Correct — use the helper
+appendToAllMemoryDirs(cwd, 'progress.md', entry);
+syncToAllMemoryDirs(cwd, 'activeContext.md', content);
+
+// ❌ Wrong — single-location write
+fs.appendFileSync(path.join(cwd, 'memory-bank/progress.md'), entry);
+```
+
+### Drift detection
+`checkMemoryDrift(cwd)` warns when the two locations have diverged. It is called
+automatically in READING_CONTEXT before any LLM call. If drift is found, call
+`syncToAllMemoryDirs()` to re-align from the authoritative source.
+
+### Sync order
+1. `loadMemoryBankSync()` — sync read, absolute first operation
+2. `checkMemoryDrift()` — warn on divergence
+3. `detectAgentDuplicates()` — scan src/ for file-level duplicates
+4. `loadProjectMemoryBank()` — async augment
+5. → LLM calls may now begin
+
+---
+
+## 3. Duplicate Detection Pattern
+
+Run `detectAgentDuplicates(qaAgentRoot)` during READING_CONTEXT. It scans:
+- **Name collisions:** same `basename` in multiple directories
+- **Content clones:** byte-identical files at different paths (via MD5 hash)
+
+On clean workspace: `DuplicateReport.clean === true`, no warnings.
+On issues: `[DUPLICATE-DETECTOR]` prefix with explicit paths logged.
+
+Do NOT suppress the warnings. Investigate and remove the duplicate before generating
+new code for the affected module — the LLM may otherwise generate conflicting versions.
+
+---
+
+## 4. Code Condensation Principles
 
 ### No Redundant Wrappers
-- Do **not** create separate helper files for operations accomplishable cleanly in **under 5 lines** of native Node.js or framework code.
+- Do **not** create separate helper files for operations accomplishable in **under 5 lines** of native Node.js.
 - Examples to **avoid** as standalone modules:
-  - `readFileAsString.ts` → use `fs.readFileSync` / `fs.promises.readFile` inline
+  - `readFileAsString.ts` → use `fs.readFileSync` inline
   - `sleep.ts` → use `await new Promise(r => setTimeout(r, ms))` inline
-  - `stripMarkdownFences.ts` → one regex inline at the call site in `testGenerator.ts`
 - **Exception:** Logic reused in **2+ layers** → extract to `src/utils/` only.
 
 ### Shared State Architecture
-- All operational state for active QA cycles lives **purely in the Orchestrator** (class instance or single session object — pick one, use consistently).
-- Layers (`ui/`, `api/`, `patcher/`, `trigger/`) are **stateless functional modules**: accept inputs → return results → no instance fields, no module-level mutable caches.
-- Allowed Orchestrator-owned state (examples):
-  - Current run ID, start time, correlation ID
-  - Active `FIGMA_ROUTE_MAP` iteration index
-  - Accumulated bug reports and outcomes for the final summary
-  - Retry counters scoped to the current bug (passed into `retryLoop`, not stored in patcher)
-- **Forbidden:** Global singletons, module-level `let lastResult`, hidden caches inside `ui/` or `api/`.
+- All operational state lives **purely in the Orchestrator** (or the FSM for feature engineer).
+- Layers are **stateless functional modules**: accept inputs → return results.
+- **Forbidden:** Global singletons, module-level mutable caches outside `config.ts`.
 
-```
-Orchestrator (stateful)
-    │
-    ├── ui/*.ts        (stateless fn in → result out)
-    ├── api/*.ts       (stateless fn in → result out)
-    ├── patcher/*.ts   (stateless fn in → result out)
-    └── trigger/*.ts   (stateless fn in → callback out)
-```
+---
 
-### Fail Fast
-- If any external API call (**Figma**, **Anthropic**) returns a **fatal auth error** (`401`, `403`), **exit the process immediately** with a descriptive message.
-- Do **not** continue the QA loop, do **not** run empty retries, do **not** swallow and proceed to the next route.
-- Auth failures are configuration errors — not recoverable at runtime.
-- Implementation pattern:
+## 5. Environment Pattern
+
+### Config mutations require cache reset
+After any `process.env[key] = value` assignment, ALWAYS call `resetConfigCache()`
+so the next `loadConfig()` picks up the new value:
 
 ```typescript
-// In API client wrappers — not scattered in every call site
-if (status === 401 || status === 403) {
-  logger.error({ service: 'figma', status }, 'Fatal auth error — check API token');
-  process.exit(1);
-}
+process.env['OPENROUTER_MODEL'] = newModel;
+resetConfigCache();
+// loadConfig() will now return the new model
 ```
 
-- **Transient errors** (429, 5xx, network timeout): retry with backoff **only** inside the dedicated client wrapper, max 2 retries, then bubble up to Orchestrator for run-level abort.
+### Non-fatal defaults
+Missing env vars that have sensible defaults (ROUTES_DIR, BASE_APP_URL, OPENROUTER_MODEL)
+use `.default()` in zod schema — never `process.exit`. Only `OPENROUTER_API_KEY` is
+truly required (no fallback possible).
 
 ---
 
-## 3. Directory Isolation Rules
+## 6. FSM Pattern
 
-### UI Layer Separation (`src/ui/`)
-- **Only:** DOM snapshotting, Figma image fetch, pixel diff, Claude Vision semantic diff.
-- **Must never:**
-  - Parse Express routes or read `ROUTES_DIR`
-  - Execute axios HTTP tests
-  - Write patched source files
-  - Import from `src/api/` or `src/patcher/`
+The Feature Engineer uses a type-safe FSM (`FeatureEngineerFsm`). Transitions are
+explicit and logged. Invalid transitions throw — they should never be silently ignored.
 
-### API Layer Separation (`src/api/`)
-- **Only:** Route parsing, Claude test generation, axios test execution.
-- **Must never:**
-  - Launch Playwright or read PNG screenshots
-  - Call Figma API
-  - Write patched source files
-  - Import from `src/ui/` or `src/patcher/`
-
-### Patcher Sandboxing (`src/patcher/`)
-- Operates strictly on an **isolated text buffer** — read file → patch in memory → validate → write.
-- **Before overwriting live source code**, verify compile health with a dry-run subprocess:
-
-```bash
-tsc --noEmit   # against patched content written to a temp path, or project tsconfig
-```
-
-- Flow:
-  1. `bugFixer` returns corrected file content (string buffer)
-  2. Write buffer to **temp file** (not target path yet)
-  3. Run `tsc --noEmit` (or project-equivalent) against temp / project
-  4. **Pass** → `applyPatch` writes to live path
-  5. **Fail** → discard buffer, append failure to `bug.context`, retry loop continues
-- **Must never:**
-  - Import Playwright, Figma, or route parser logic
-  - Skip compile check to save time
-
-### Trigger Layer (`src/trigger/`)
-- **Only:** File watching and webhook HTTP surface.
-- Delegates all QA logic to Orchestrator — no inline test or patch code.
-
-### Utils (`src/utils/`)
-- **Only:** Config, types, logger — no business logic.
-- **Must never** import from `ui/`, `api/`, `patcher/`, `trigger/`, or `orchestrator.ts`.
+Key states where agent is blocked on I/O:
+- `READING_CONTEXT` — file reads, memory drift, dup scan
+- `COMPILING` — tsc subprocess
+- `TESTING` — Playwright subprocess
 
 ---
 
-## 4. Module Interface Pattern
+## 7. Fail-Safe Execution
 
-Every layer exports **named async functions** with explicit typed signatures. No default exports. No god objects.
+Every major execution path (feature engineer, backend run, frontend run) is wrapped in
+`try/finally`. The `finally` block calls `writeProgressLog()` unconditionally.
 
 ```typescript
-// Good — ui/screenshot.ts
-export async function captureScreenshot(route: string, baseUrl: string): Promise<string> {
-  // returns file path
-}
-
-// Bad
-export class ScreenshotService {
-  private browser: Browser;
-  async init() { ... }
-  async capture() { ... }
+try {
+  result = await runFeatureEngineer(spec, options);
+} finally {
+  writeProgressLog({ ...result, qaAgentRoot });
 }
 ```
 
-Orchestrator is the **only** place allowed to use a class or hold multi-step session state.
+This guarantees the progress log is always updated, even if the agent crashes mid-run.
 
 ---
 
-## 5. Anti-Patterns (Do Not Build)
+## 8. Anti-Patterns (Do Not Build)
 
 | Anti-Pattern | Why | Instead |
-|--------------|-----|---------|
-| Generic `BaseLayer` abstract class | Over-abstraction for 4 small modules | Plain functions per file |
-| Plugin registry / dependency injection container | YAGNI for v1 CLI agent | Direct imports in Orchestrator |
-| Event bus between layers | Hidden coupling, hard to trace | Orchestrator calls functions sequentially |
-| Separate `errors/`, `constants/`, `helpers/` dirs | Directory sprawl | `utils/types.ts`, inline constants in owning file |
-| Caching Claude responses globally | Stale plans, hidden state | Orchestrator may pass prior context explicitly |
-| Wrapper around axios for every verb | Noise | One shared axios instance in `testRunner.ts` |
-| Multiple logger implementations | DRY violation | Single `utils/logger.ts` |
+|---|---|---|
+| Write progress to only one memory location | LLM reads both; stale context corrupts runs | Use `appendToAllMemoryDirs()` |
+| Skip `checkMemoryDrift` | Silent context drift is hard to debug | Keep it in READING_CONTEXT |
+| Generate code without dup scan | May create second copy of a module | Always run `detectAgentDuplicates` first |
+| `process.env` mutation without `resetConfigCache()` | Config reads stale cache | Always pair mutations with reset |
+| Module-level mutable state | Hidden coupling | Orchestrator-owned state only |
+| Generic BaseLayer abstract class | Over-abstraction | Plain functions per file |
 
 ---
 
-## 6. File Size & Complexity Limits
+## 9. File Size & Complexity Limits
 
 | Guideline | Limit |
 |-----------|-------|
 | Max lines per file (excluding types/prompts) | ~150 |
-| Max functions exported per file | 3 |
+| Max functions exported per file | 3–5 |
 | Max function length | ~40 lines |
-| Max cyclomatic complexity | Split if > 2 nested conditionals |
 
 When a file exceeds limits, split **by responsibility** (not by helper extraction).
-
----
-
-## 7. Claude / LLM Call Pattern
-
-- Prompts live as **string templates** in the calling file or a co-located `prompts/` subfolder **only if** prompts exceed ~20 lines.
-- One Claude call = one purpose (plan, generate tests, patch, vision diff). No mega-prompts doing multiple jobs.
-- Always strip markdown fences at the parse site — no shared `parseClaudeJson.ts` unless used 3+ times.
-- Pass **minimal context**: file content + bug report + retry context — not entire repo.
-
----
-
-## 8. Orchestrator Responsibilities (Single Owner)
-
-The Orchestrator alone may:
-
-- Loop over `FIGMA_ROUTE_MAP` and parsed routes
-- Decide pixel threshold → semantic diff escalation
-- Invoke `retryLoop` with the correct `verifyFn`
-- Aggregate outcomes and emit final run summary
-- Call `process.exit` on fatal auth failures bubbled from layers
-
-The Orchestrator must **not**:
-
-- Implement pixel diff, axios calls, or Claude prompts inline — delegate to layers
-- Grow beyond ~200 lines — extract private helpers **inside the same file** first, split only if necessary
-
----
-
-## 9. Testing Pattern (When Added)
-
-- Unit-test **stateless layer functions** with mocked I/O.
-- Integration-test **Orchestrator** with stubbed Claude/Figma/Playwright — one happy path, one auth-fail fast exit.
-- No test utilities directory until 3+ tests share the same setup.
 
 ---
 
@@ -196,7 +155,7 @@ The Orchestrator must **not**:
 - [ ] Is it reused in 2+ layers? (If no → don't extract to `utils/`)
 - [ ] Does it introduce state? (If yes → belongs in Orchestrator only)
 - [ ] Does it cross layer boundaries? (If yes → redesign)
-- [ ] Would removing it later be painful? (If no → probably didn't need it)
+- [ ] Run `detectAgentDuplicates` — does a file with this name already exist?
 
 ---
 

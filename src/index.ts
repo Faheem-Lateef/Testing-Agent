@@ -46,6 +46,11 @@ import {
 } from './cli/banner.js';
 import { runEnvGuard, softValidateEnv, type EnvKeyProfile } from './cli/envGuard.js';
 import {
+  applyModelDefault,
+  printActiveModelLine,
+  promptModelSwitch,
+} from './cli/modelConfig.js';
+import {
   parseCliArgs,
   promptTestingIntent,
   promptFeatureSpec,
@@ -171,40 +176,44 @@ async function executeEngineer(featureSpec: string): Promise<void> {
 // ─── run command ──────────────────────────────────────────────────────────────
 
 async function handleRunCommand(intent?: TestingIntent, featurePrompt?: string): Promise<void> {
-  // Determine env profiles to validate before doing anything expensive
-  let profilesToCheck: EnvKeyProfile[] = [];
-
+  // ── Check core env keys (API key only) before showing the menu ────────────
   if (!intent) {
-    // We don't know yet — check core only, the rest after menu
     await runEnvGuard(['core']);
   }
 
-  // Resolve intent via menu if not already set
-  if (!intent) {
-    intent = await promptTestingIntent();
+  // ── Intent resolution loop ─────────────────────────────────────────────────
+  // When the user picks ⚙️ "Switch Active AI Model" we run the model switcher
+  // then loop back to the main menu — no run is triggered until a real mode is
+  // chosen.
+  let resolvedIntent = intent;
+  while (!resolvedIntent || resolvedIntent === 'switch-model') {
+    if (resolvedIntent === 'switch-model') {
+      await promptModelSwitch();
+    }
+    resolvedIntent = await promptTestingIntent();
   }
 
-  // Map intent to required env profiles
-  const profileMap: Record<TestingIntent, EnvKeyProfile[]> = {
+  // ── Profile-specific env guard (ROUTES_DIR, BASE_APP_URL, etc.) ───────────
+  const profileMap: Record<Exclude<TestingIntent, 'switch-model'>, EnvKeyProfile[]> = {
     backend:   ['backend'],
     frontend:  ['frontend'],
     fullstack: ['backend', 'frontend'],
     engineer:  ['backend', 'frontend'],
   };
 
-  profilesToCheck = profileMap[intent];
-  await runEnvGuard(profilesToCheck);
+  await runEnvGuard(profileMap[resolvedIntent]);
 
-  // Soft format warnings
   const softWarns = softValidateEnv();
   for (const w of softWarns) printWarning(w);
 
-  printIntentBadge(intent);
+  // Print which model will be used for this run
+  printActiveModelLine();
+  printIntentBadge(resolvedIntent);
 
-  // Run autodiscovery to fill ROUTES_DIR etc. from pasted backends
+  // Auto-discover ROUTES_DIR / BASE_APP_URL from pasted backends if needed
   await prepareEnvironment();
 
-  switch (intent) {
+  switch (resolvedIntent) {
     case 'backend':
       await executeBackend();
       break;
@@ -218,7 +227,6 @@ async function handleRunCommand(intent?: TestingIntent, featurePrompt?: string):
       break;
 
     case 'engineer': {
-      // --prompt passed inline, or collected interactively
       const spec = featurePrompt ?? (await promptFeatureSpec());
       await executeEngineer(spec);
       break;
@@ -239,12 +247,16 @@ async function main(): Promise<void> {
 
   printBanner();
 
-  // ── Sync cold-boot memory read ────────────────────────────────────────────
-  // Runs as the first file-system operation on every non-trivial command,
-  // using fs.readFileSync so context is available before any async work.
+  // ── 1. Sync cold-boot memory read ────────────────────────────────────────
   if (parsed.command !== 'discover') {
     loadMemoryBankSync(process.cwd());
   }
+
+  // ── 2. AI model default fallback ─────────────────────────────────────────
+  // If OPENROUTER_MODEL is missing or empty, silently inject
+  // google/gemini-2.5-flash and print the canonical log line.
+  // Must run before any loadConfig() or LLM call.
+  await applyModelDefault();
 
   switch (parsed.command) {
     case 'run': {
@@ -268,6 +280,7 @@ async function main(): Promise<void> {
 
     case 'engineer': {
       await runEnvGuard(['core', 'backend', 'frontend']);
+      printActiveModelLine();
       printIntentBadge('engineer');
       // legacy positional args: tsx src/index.ts engineer "<spec>"
       const positional = process.argv.slice(3).join(' ').trim();

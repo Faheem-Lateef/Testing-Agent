@@ -44,33 +44,73 @@ function extractCodeBlocks(text: string): Array<{ filePath: string; content: str
 
 /**
  * PHASE 1 — Full-stack developer: Mongoose, Express, Next.js UI.
+ * When isBlankCanvas=true the prompt requests the COMPLETE project structure
+ * rather than an incremental feature patch.
  */
 export async function runFullStackDevelopmentPhase(
   featureSpec: string,
   memory: ProjectMemoryBank,
   repoSummary: string,
   priorErrors?: string,
+  isBlankCanvas = false,
 ): Promise<DevelopmentPhaseOutput> {
   const config = loadConfig();
   const openai = createOpenRouterClient(config);
 
-  const prompt = `You are a Senior Full-Stack Developer implementing a feature in an e-commerce monorepo.
+  // ── Blank-canvas section injected only for greenfield projects ────────────
+  const blankCanvasSection = isBlankCanvas
+    ? `
+⚡ GREENFIELD PROJECT — BLANK CANVAS MODE ⚡
+This is a BRAND NEW project with NO existing code. You MUST generate the COMPLETE
+application from scratch. Do NOT assume any files exist except:
+  - backend: src/global.d.ts, src/index.ts (placeholder), src/routes/index.ts (placeholder)
+  - frontend: src/global.d.ts, src/app/page.tsx (placeholder), src/app/layout.tsx (placeholder)
+
+You MUST output ALL of the following files (replace the placeholders completely):
+
+BACKEND FILES (use // file: backend: prefix):
+  src/index.ts              — Express app setup, CORS, body-parser, MongoDB connect, error handler
+  src/config/database.ts    — Mongoose connect function using MONGODB_URI env var
+  src/middleware/errorHandler.ts — Central error handler middleware
+  src/routes/index.ts       — Master router that mounts all feature routes
+  src/models/<Entity>.ts    — Mongoose schema + model for EVERY domain entity
+  src/controllers/<Entity>Controller.ts — CRUD request handlers for each entity
+  src/routes/<entity>Routes.ts — Express router for each entity
+
+FRONTEND FILES (use // file: frontend: prefix):
+  src/app/layout.tsx        — Root Next.js layout with navigation
+  src/app/page.tsx           — Home page
+  src/app/<feature>/page.tsx — Feature listing/browsing page
+  src/app/<feature>/[id]/page.tsx — Detail page
+  src/app/booking/page.tsx  — (or equivalent action page)
+  src/components/<Feature>Card.tsx — Card component
+  src/components/<Feature>Form.tsx — Form component  
+  src/lib/api.ts             — fetch wrapper with BASE_URL pointing to backend
+
+Backend must run on port 3001. Frontend must call backend at http://localhost:3001.
+ALL files must compile with: tsc --noEmit  (tsconfig has strict:false, skipLibCheck:true)
+`
+    : '';
+
+  const prompt = `You are a Senior Full-Stack Developer.${isBlankCanvas ? ' You are building a COMPLETE application from scratch.' : ' You are implementing a feature in an existing monorepo.'}
 
 DEVELOPMENT PHASE — output ONLY markdown code fences (TypeScript/TSX). NO prose outside fences.
 
 Each fence MUST begin with: // file: backend:relative/path  OR  // file: frontend:relative/path
 
 Examples:
-// file: backend:src/models/Coupon.ts
-// file: backend:src/routes/couponRoutes.ts
-// file: backend:src/routes/index.ts  (add router.use line)
-// file: frontend:src/app/checkout/page.tsx
-
-REQUIREMENTS:
-1. Database: Mongoose schemas/models with validation (codes, discount %, usage limits, expiry as needed).
-2. Backend: controllers, services, routes under ${memory.apiVersionPrefix}, wire into routes/index.ts.
-3. Frontend: physical UI fields, state handlers, buttons on checkout/cart as needed.
-4. Use ${memory.errorUtilityHint}. Match ${memory.databaseProfile}.
+\`\`\`typescript
+// file: backend:src/models/Car.ts
+import mongoose from 'mongoose';
+// ... full file content
+\`\`\`
+${blankCanvasSection}
+REQUIREMENTS (apply to all modes):
+1. Database: Mongoose schemas/models with full validation for every entity.
+2. Backend: controllers + services + routes under /api/v1, wire ALL routes into src/routes/index.ts.
+3. Frontend: complete pages + components with forms, state handlers, API calls, and navigation.
+4. Error handling: use standard express error middleware returning { success, message }.
+5. ALL files must be self-contained valid TypeScript that compiles with strict:false, skipLibCheck:true.
 
 KNOWLEDGE BASE:
 ${formatMemoryBankForPrompt(memory)}
@@ -78,12 +118,12 @@ ${formatMemoryBankForPrompt(memory)}
 REPOSITORY SNAPSHOT:
 ${repoSummary.slice(0, 10_000)}
 
-FEATURE REQUEST:
+FEATURE REQUEST / SYSTEM SPEC:
 ${featureSpec}
 
-${priorErrors ? `FIX THESE ERRORS:\n${priorErrors}` : ''}`;
+${priorErrors ? `FIX THESE COMPILE ERRORS:\n${priorErrors}` : ''}`;
 
-  engineerLog('OpenRouter PHASE-1: full-stack development');
+  engineerLog(`OpenRouter PHASE-1: ${isBlankCanvas ? 'GREENFIELD full-stack generation' : 'feature development'}`);
 
   let response;
   try {

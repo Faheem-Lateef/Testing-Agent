@@ -7,7 +7,9 @@ import type { FigmaRouteMap } from './types.js';
 
 const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().min(1, 'is required'),
-  OPENROUTER_MODEL: z.string().min(1, 'is required'),
+  // Default applied by applyModelDefault() before loadConfig() is ever called.
+  // Schema uses a safe fallback so loadConfig() never crashes on missing model.
+  OPENROUTER_MODEL: z.string().default('google/gemini-2.5-flash'),
   BASE_APP_URL: z.string().url('must be a valid URL').optional(),
   FRONTEND_APP_URL: z.string().url('must be a valid URL').optional(),
   E2E_MOBILE_VIEWPORT: z
@@ -48,6 +50,15 @@ export type AppConfig = Omit<
 
 let cached: AppConfig | null = null;
 
+/**
+ * Clears the in-memory config cache so the next loadConfig() call re-parses
+ * process.env. Call this after programmatically injecting env defaults (e.g.
+ * for blank-canvas feature engineer runs) before loadConfig() is invoked.
+ */
+export function resetConfigCache(): void {
+  cached = null;
+}
+
 function parseJsonRecord(raw: string, label: string): FigmaRouteMap {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -83,10 +94,17 @@ export function loadConfig(): AppConfig {
   let gitRepoRoot = result.data.GIT_REPO_ROOT ?? '.';
 
   if (!routesDir?.trim()) {
-    logger.fatal(
-      'ROUTES_DIR is required — paste your backend into this workspace and run `tsx src/index.ts discover`, or set ROUTES_DIR in .env',
+    // Provide a non-fatal fallback so blank-canvas Feature Engineer runs
+    // can inject ROUTES_DIR programmatically after scaffolding the backend.
+    // The agent will set process.env.ROUTES_DIR then call resetConfigCache()
+    // before any route-dependent operation begins.
+    routesDir = process.env['GIT_REPO_ROOT']
+      ? `${process.env['GIT_REPO_ROOT']}/src/routes`
+      : 'src/routes';
+    logger.warn(
+      { fallback: routesDir },
+      'ROUTES_DIR not set — using fallback path. Set ROUTES_DIR in .env for persistent config.',
     );
-    process.exit(1);
   }
 
   cached = {

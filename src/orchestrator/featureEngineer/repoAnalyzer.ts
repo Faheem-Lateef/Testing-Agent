@@ -33,40 +33,69 @@ async function readSnippet(filePath: string, maxChars = 2_000): Promise<string> 
   }
 }
 
+/** Content-based threshold below which we consider a project blank/empty. */
+const BLANK_CANVAS_FILE_THRESHOLD = 5;
+
 export interface RepoSnapshot {
   backendRoot: string;
   frontendRoot: string;
   summary: string;
   backendFiles: string[];
   frontendFiles: string[];
+  /** True when one or both projects have fewer than 5 source files. */
+  isBlankCanvas: boolean;
 }
 
 export async function analyzeRepositories(
   backendRoot: string,
   frontendRoot: string,
 ): Promise<RepoSnapshot> {
-  phaseLog('PHASE_1_DEVELOPMENT', 'Analyzing ecommerce-backend and ecommerce-frontend repositories…');
+  phaseLog('PHASE_1_DEVELOPMENT', 'Analyzing backend and frontend repositories…');
 
-  const backendFiles = (await pathExists(backendRoot))
+  const backendExists = await pathExists(backendRoot);
+  const frontendExists = await pathExists(frontendRoot);
+
+  const backendFiles = backendExists
     ? (await listFiles(path.join(backendRoot, 'src'))).map((f) => path.relative(backendRoot, f))
     : [];
 
-  const frontendFiles = (await pathExists(frontendRoot))
+  const frontendFiles = frontendExists
     ? (await listFiles(path.join(frontendRoot, 'src'))).map((f) => path.relative(frontendRoot, f))
     : [];
 
+  // Detect blank canvas: fewer real source files than the scaffold placeholders
+  const realBackendFiles = backendFiles.filter(
+    (f) => !f.includes('global.d.ts') && !f.endsWith('.d.ts'),
+  );
+  const realFrontendFiles = frontendFiles.filter(
+    (f) => !f.includes('global.d.ts') && !f.endsWith('.d.ts'),
+  );
+  const isBlankCanvas =
+    realBackendFiles.length < BLANK_CANVAS_FILE_THRESHOLD ||
+    realFrontendFiles.length < BLANK_CANVAS_FILE_THRESHOLD;
+
+  if (isBlankCanvas) {
+    phaseLog('PHASE_1_DEVELOPMENT', '⚡ BLANK CANVAS detected — requesting complete project generation from OpenRouter');
+  }
+
+  // Sample key snippets from an existing project (empty strings for blank canvas)
   const routeIndex = path.join(backendRoot, 'src', 'routes', 'index.ts');
-  const checkoutPage = path.join(frontendRoot, 'src', 'app', 'checkout', 'page.tsx');
+  const entryPage = path.join(frontendRoot, 'src', 'app', 'page.tsx');
   const orderService = path.join(backendRoot, 'src', 'services', 'orderService.ts');
 
   const snippets = [
     await readSnippet(routeIndex),
-    await readSnippet(checkoutPage),
+    await readSnippet(entryPage),
     await readSnippet(orderService),
   ].filter(Boolean);
 
   const summary = JSON.stringify(
     {
+      isBlankCanvas,
+      backendRoot,
+      frontendRoot,
+      backendExists,
+      frontendExists,
       backendFileCount: backendFiles.length,
       frontendFileCount: frontendFiles.length,
       sampleBackendPaths: backendFiles.slice(0, 40),
@@ -77,5 +106,5 @@ export async function analyzeRepositories(
     2,
   );
 
-  return { backendRoot, frontendRoot, summary, backendFiles, frontendFiles };
+  return { backendRoot, frontendRoot, summary, backendFiles, frontendFiles, isBlankCanvas };
 }

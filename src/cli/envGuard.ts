@@ -30,12 +30,9 @@ const ENV_SPECS: EnvKeySpec[] = [
     placeholder: 'sk-or-...',
     secret: true,
   },
-  {
-    key: 'OPENROUTER_MODEL',
-    profile: ['core', 'backend', 'frontend'],
-    description: 'OpenRouter model slug to use for AI generation',
-    placeholder: 'anthropic/claude-sonnet-4',
-  },
+  // OPENROUTER_MODEL is intentionally omitted here.
+  // It is auto-defaulted to google/gemini-2.5-flash by applyModelDefault()
+  // in src/cli/modelConfig.ts and can be hot-swapped via the ⚙️ menu option.
   {
     key: 'ROUTES_DIR',
     profile: ['backend'],

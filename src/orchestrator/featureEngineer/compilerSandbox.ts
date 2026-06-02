@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 
 import { compilerLog } from './logging.js';
 import type { CompileSandboxResult } from './types.js';
@@ -64,6 +65,34 @@ export async function pathExists(dir: string): Promise<boolean> {
   }
 }
 
+/**
+ * Ensures the TypeScript toolchain is bootstrapped in a freshly-scaffolded
+ * project before attempting compilation. Only runs npm install when
+ * node_modules is absent — skips for already-initialised projects.
+ */
+function ensureTypescriptInstalled(projectRoot: string, label: string): void {
+  const nmPath = path.join(projectRoot, 'node_modules');
+  if (existsSync(nmPath)) return;
+
+  compilerLog(`${label} — node_modules absent, bootstrapping typescript…`);
+  try {
+    execSync(
+      'npm install --save-dev typescript @types/node --no-audit --no-fund --prefer-offline --loglevel=error',
+      {
+        cwd: projectRoot,
+        encoding: 'utf-8',
+        timeout: 180_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: { ...process.env, CI: '1' },
+      },
+    );
+    compilerLog(`${label} — typescript bootstrap complete`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    compilerLog(`${label} — bootstrap warning (continuing): ${msg.slice(0, 200)}`);
+  }
+}
+
 export async function verifyProjectCompile(
   project: 'backend' | 'frontend' | 'qa-agent',
   projectRoot: string,
@@ -75,7 +104,7 @@ export async function verifyProjectCompile(
       cwd: projectRoot,
       command: '(skipped)',
       success: true,
-      stdout: '',
+      stdout: 'Project directory absent — treated as passing for blank-canvas run',
       stderr: '',
       exitCode: 0,
     };
@@ -83,7 +112,14 @@ export async function verifyProjectCompile(
 
   const pkgPath = path.join(projectRoot, 'package.json');
   if (!(await pathExists(pkgPath))) {
+    // No package.json — try tsc directly, bootstrap first
+    ensureTypescriptInstalled(projectRoot, project);
     return runInCwd(project, projectRoot, ['npx', 'tsc', '--noEmit']);
+  }
+
+  // For scaffolded blank-canvas projects, ensure TypeScript is available
+  if (project !== 'qa-agent') {
+    ensureTypescriptInstalled(projectRoot, project);
   }
 
   let parts = COMPILE_COMMANDS[project];
