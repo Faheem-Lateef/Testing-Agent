@@ -33,6 +33,102 @@ export function syncToAllMemoryDirs(cwd: string, filename: string, content: stri
   memoryLog(`Synced ${filename} → [${MEMORY_WRITE_DIRS.join(', ')}]`);
 }
 
+/** Create agent progress + activeContext stubs in both canonical dirs if missing. */
+export function ensureAgentMemoryBankFiles(root: string): void {
+  const progressStub = [
+    '# QA Agent — Progress Log',
+    '',
+    '> Auto-appended by `writeProgressLog()` after every run.',
+    '',
+    '---',
+    '',
+  ].join('\n');
+
+  const contextStub = [
+    '# Active Context',
+    '',
+    '> **Last updated:** (pending first run)',
+    '> Last run: (not yet run)',
+    '',
+    '---',
+    '',
+  ].join('\n');
+
+  for (const dir of MEMORY_WRITE_DIRS) {
+    const dirPath = resolveWriteDir(root, dir);
+    mkdirSync(dirPath, { recursive: true });
+    const progressPath = path.join(dirPath, 'progress.md');
+    const contextPath = path.join(dirPath, 'activeContext.md');
+    if (!existsSync(progressPath)) {
+      writeFileSync(progressPath, progressStub, 'utf-8');
+      memoryLog(`[MEMORY-BANK] Created ${dir}/progress.md`);
+    }
+    if (!existsSync(contextPath)) {
+      writeFileSync(contextPath, contextStub, 'utf-8');
+      memoryLog(`[MEMORY-BANK] Created ${dir}/activeContext.md`);
+    }
+  }
+}
+
+/**
+ * Stamps Last updated + Last run lines without duplicating blockquote prefixes.
+ * Handles `> Last updated:`, `> **Last updated:**`, and plain `Last updated:` formats.
+ */
+function stampContextHeaderContent(
+  content: string,
+  timestamp: string,
+  runLine: string,
+): string {
+  const lastUpdatedLine = `> **Last updated:** ${timestamp}`;
+  const lastRunLine = `> ${runLine}`;
+
+  let c = content.trim().length > 0 ? content : '# Active Context\n\n';
+
+  if (/last updated:/im.test(c)) {
+    c = c.replace(/^[^\n]*last updated:[^\n]*$/im, lastUpdatedLine);
+  } else {
+    const h1 = c.match(/^#[^\n]+\n/m);
+    if (h1?.index !== undefined) {
+      const insertAt = h1.index + h1[0].length;
+      c = `${c.slice(0, insertAt)}${lastUpdatedLine}\n${c.slice(insertAt)}`;
+    } else {
+      c = `${lastUpdatedLine}\n\n${c}`;
+    }
+  }
+
+  if (/last run:/im.test(c)) {
+    c = c.replace(/^[^\n]*last run:[^\n]*$/im, lastRunLine);
+  } else if (/last updated:/im.test(c)) {
+    c = c.replace(/(^> \*\*Last updated:\*\*[^\n]*\n)/im, `$1${lastRunLine}\n`);
+  } else {
+    c = `${lastUpdatedLine}\n${lastRunLine}\n\n${c}`;
+  }
+
+  return c;
+}
+
+function writeContextHeaderFile(
+  filePath: string,
+  featureSpec: string,
+  outcome: 'SUCCESS' | 'FAILED',
+  finalState: string,
+  logPrefix: string,
+): void {
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const specSnippet = featureSpec.slice(0, 80);
+  const runLine = `Last run: "${specSnippet}" → ${outcome} (${finalState})`;
+
+  try {
+    const prior = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
+    const stamped = stampContextHeaderContent(prior, timestamp, runLine);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, stamped, 'utf-8');
+    memoryLog(`${logPrefix} Context header stamped → ${timestamp} | ${outcome}`);
+  } catch (err) {
+    console.warn(`⚠  ${logPrefix} Could not stamp activeContext.md: ${String(err)}`);
+  }
+}
+
 const MEMORY_CANDIDATES = [
   '.cursorrules',
   'memory-bank/activeContext.md',
@@ -247,42 +343,212 @@ export function refreshActiveContextHeader(
   outcome: 'SUCCESS' | 'FAILED',
   finalState: string,
 ): void {
-  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const specSnippet = featureSpec.slice(0, 80);
-  const runLine = `Last run: "${specSnippet}" → ${outcome} (${finalState})`;
-
+  ensureAgentMemoryBankFiles(cwd);
   for (const dir of MEMORY_WRITE_DIRS) {
-    const filePath = path.join(cwd, dir, 'activeContext.md');
-    try {
-      let content = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
+    writeContextHeaderFile(
+      path.join(cwd, dir, 'activeContext.md'),
+      featureSpec,
+      outcome,
+      finalState,
+      '[MEMORY-BANK]',
+    );
+  }
+}
 
-      // Update or insert "Last updated:" line
-      if (/\*\*Last updated:\*\*|> \*\*Last updated:\*\*|Last updated:/i.test(content)) {
-        content = content.replace(
-          /(\*\*Last updated:\*\*|> \*\*Last updated:\*\*|Last updated:)[^\n]*/i,
-          `> **Last updated:** ${timestamp}`,
-        );
-      }
+// ─── External project memory bank ────────────────────────────────────────────
+// These functions operate exclusively on the EXTERNAL project directory
+// (e.g. D:\car-rental-app\memory-bank\).  They NEVER touch the agent's own
+// memory-bank/ or .cursor/memory/ trees.
 
-      // Update or insert "Last run:" line after the Last updated line
-      if (/Last run:/i.test(content)) {
-        content = content.replace(/Last run:[^\n]*/i, runLine);
-      } else {
-        // Inject after the first "Last updated" line
-        content = content.replace(
-          /(> \*\*Last updated:\*\*[^\n]*\n)/,
-          `$1> ${runLine}\n`,
-        );
-      }
+/**
+ * Seeds a fresh memory bank inside the external project directory.
+ * Creates activeContext.md + progress.md if they don't already exist.
+ * Called once when a new sandbox project is created.
+ */
+export function initProjectMemoryBank(projectRoot: string, projectSlug: string): void {
+  const memoryDir = path.join(projectRoot, 'memory-bank');
+  mkdirSync(memoryDir, { recursive: true });
 
-      mkdirSync(path.join(cwd, dir), { recursive: true });
-      writeFileSync(filePath, content, 'utf-8');
-    } catch {
-      // Non-fatal — header stamp is best-effort
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const activeContextContent = [
+    `# Active Context — ${projectSlug}`,
+    ``,
+    `> **Last updated:** ${timestamp}`,
+    `> Last run: (not yet run)`,
+    ``,
+    `---`,
+    ``,
+    `## Project`,
+    ``,
+    `- **Slug:** \`${projectSlug}\``,
+    `- **Backend:** \`${path.join(projectRoot, 'backend')}\``,
+    `- **Frontend:** \`${path.join(projectRoot, 'frontend')}\``,
+    `- **Env:** \`${path.join(projectRoot, '.env')}\``,
+    ``,
+    `## Features Implemented`,
+    ``,
+    `*(auto-updated by Feature Engineer after each successful run)*`,
+    ``,
+    `## Routes`,
+    ``,
+    `*(auto-populated by Feature Engineer Phase 1)*`,
+    ``,
+    `## Schemas`,
+    ``,
+    `*(auto-populated by Feature Engineer Phase 1)*`,
+    ``,
+    `## Playwright Heal Cycles`,
+    ``,
+    `*(live logs appended by Feature Engineer Phase 3)*`,
+    ``,
+  ].join('\n');
+
+  const progressContent = [
+    `# Progress Log — ${projectSlug}`,
+    ``,
+    `> Auto-appended by QA Feature Engineer after every run.`,
+    `> Tracks feature implementation, routes, schemas, and healing cycles.`,
+    ``,
+    `---`,
+    ``,
+  ].join('\n');
+
+  const contextPath = path.join(memoryDir, 'activeContext.md');
+  const progressPath = path.join(memoryDir, 'progress.md');
+
+  if (!existsSync(contextPath)) {
+    writeFileSync(contextPath, activeContextContent, 'utf-8');
+    memoryLog(`[PROJECT-MEMORY] Created activeContext.md → ${contextPath}`);
+  }
+  if (!existsSync(progressPath)) {
+    writeFileSync(progressPath, progressContent, 'utf-8');
+    memoryLog(`[PROJECT-MEMORY] Created progress.md → ${progressPath}`);
+  }
+}
+
+/**
+ * Appends a structured progress entry to the EXTERNAL project's
+ * memory-bank/progress.md. Completely separate from the agent's own logs.
+ *
+ * Use alongside writeProgressLog() — external project log only.
+ */
+export function writeProjectProgressLog(
+  params: ProgressLogParams & { projectRoot: string },
+): void {
+  const { projectRoot, ...rest } = params;
+  const memoryDir = path.join(projectRoot, 'memory-bank');
+  const logPath = path.join(memoryDir, 'progress.md');
+
+  const changes = rest.fileChanges ?? [];
+  const cycles = rest.healCycles ?? [];
+  const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+  const backendFiles = changes.filter((f) => f.repo === 'backend');
+  const endpointLines =
+    backendFiles.length > 0
+      ? backendFiles.map((f) => `  - \`${f.relativePath}\``).join('\n')
+      : '  - N/A';
+
+  const healedCycles = cycles.filter(
+    (h) => h.fixesApplied.length > 0 || h.debugAnalysis?.bugFound,
+  );
+  const bugsSection =
+    healedCycles.length > 0
+      ? healedCycles
+          .map(
+            (h) =>
+              `  - Cycle ${h.cycle}: ${h.debugAnalysis?.rootCause ?? h.fixesApplied.join(', ')}`,
+          )
+          .join('\n')
+      : '  - None';
+
+  const lines: string[] = [
+    `## [${timestamp}] ${rest.commandType}: ${rest.featureSpec.slice(0, 100)}`,
+    ``,
+    `- **Outcome**: ${rest.success ? 'SUCCESS ✓' : 'FAILED ✗'}`,
+    `- **FSM State**: \`${rest.finalState}\``,
+    ``,
+    `### Files Changed (${changes.length})`,
+  ];
+
+  if (changes.length === 0) {
+    lines.push('  - (none recorded)');
+  } else {
+    for (const f of changes) {
+      lines.push(`  - [${f.repo}] **${f.action}**: \`${f.relativePath}\``);
     }
   }
 
-  memoryLog(`Active context header stamped → ${timestamp} | ${outcome}`);
+  lines.push('', '### Endpoints Checked', endpointLines);
+  lines.push('', '### Playwright Heal Cycles', bugsSection);
+
+  if (rest.generatedTestPath) {
+    lines.push('', '### Generated Test', `  - \`${rest.generatedTestPath}\``);
+  }
+
+  lines.push('', '---', '');
+
+  const entry = lines.join('\n') + '\n';
+
+  try {
+    mkdirSync(memoryDir, { recursive: true });
+    appendFileSync(logPath, entry, 'utf-8');
+    console.log(`💾 [PROJECT-MEMORY] Progress log updated → ${logPath}`);
+  } catch (err) {
+    console.warn(`⚠  [PROJECT-MEMORY] Could not write project progress log: ${String(err)}`);
+  }
+}
+
+/**
+ * Stamps the "Last updated" and "Last run" header lines in the EXTERNAL
+ * project's memory-bank/activeContext.md. Body is left intact.
+ */
+export function refreshProjectContextHeader(
+  projectRoot: string,
+  featureSpec: string,
+  outcome: 'SUCCESS' | 'FAILED',
+  finalState: string,
+): void {
+  writeContextHeaderFile(
+    path.join(projectRoot, 'memory-bank', 'activeContext.md'),
+    featureSpec,
+    outcome,
+    finalState,
+    '[PROJECT-MEMORY]',
+  );
+}
+
+/**
+ * Guaranteed agent memory finalization: ensure files exist, append progress,
+ * stamp activeContext header in memory-bank/ AND .cursor/memory/.
+ */
+export async function finalizeAgentMemoryUpdate(params: ProgressLogParams): Promise<void> {
+  const root = params.qaAgentRoot ?? process.cwd();
+  ensureAgentMemoryBankFiles(root);
+  await writeProgressLog(params);
+  refreshActiveContextHeader(
+    root,
+    params.featureSpec,
+    params.success ? 'SUCCESS' : 'FAILED',
+    params.finalState,
+  );
+}
+
+/**
+ * Guaranteed external project memory finalization after a feature-engineer run.
+ */
+export function finalizeProjectMemoryUpdate(
+  params: ProgressLogParams & { projectRoot: string },
+): void {
+  const { projectRoot, ...rest } = params;
+  writeProjectProgressLog({ ...rest, projectRoot });
+  refreshProjectContextHeader(
+    projectRoot,
+    rest.featureSpec,
+    rest.success ? 'SUCCESS' : 'FAILED',
+    rest.finalState,
+  );
 }
 
 // ─── Progress log writer ──────────────────────────────────────────────────────
@@ -307,8 +573,7 @@ export interface ProgressLogParams {
  */
 export async function writeProgressLog(params: ProgressLogParams): Promise<void> {
   const root = params.qaAgentRoot ?? process.cwd();
-  const dir = path.join(root, 'memory-bank');
-  const logPath = path.join(dir, 'progress.md');
+  ensureAgentMemoryBankFiles(root);
 
   const changes = params.fileChanges ?? [];
   const cycles = params.healCycles ?? [];

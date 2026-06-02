@@ -33,7 +33,7 @@ import { loadConfig } from './utils/config.js';
 import { logger } from './utils/logger.js';
 import {
   loadMemoryBankSync,
-  writeProgressLog,
+  finalizeAgentMemoryUpdate,
 } from './orchestrator/featureEngineer/memoryBank.js';
 import {
   printBanner,
@@ -54,9 +54,11 @@ import {
   parseCliArgs,
   promptTestingIntent,
   promptFeatureSpec,
+  promptProjectWorkspace,
   printIntentBadge,
   type TestingIntent,
 } from './cli/menu.js';
+import { resolveSandbox } from './orchestrator/featureEngineer/sandbox.js';
 
 // ─── Backend health check ─────────────────────────────────────────────────────
 
@@ -95,7 +97,7 @@ async function executeBackend(): Promise<void> {
     success = true;
     printSuccess('Backend API phase complete');
   } finally {
-    await writeProgressLog({
+    await finalizeAgentMemoryUpdate({
       commandType: 'backend',
       featureSpec: 'Backend API test suite',
       success,
@@ -120,7 +122,7 @@ async function executeFrontend(): Promise<void> {
       }
     }
   } finally {
-    await writeProgressLog({
+    await finalizeAgentMemoryUpdate({
       commandType: 'frontend',
       featureSpec: 'Frontend E2E sweep',
       success,
@@ -148,7 +150,7 @@ async function executeFullStack(): Promise<void> {
     success = true;
     printSuccess('Full-stack QA cycle complete');
   } finally {
-    await writeProgressLog({
+    await finalizeAgentMemoryUpdate({
       commandType: 'fullstack',
       featureSpec: 'Full-stack QA cycle (backend + frontend + self-evolution)',
       success,
@@ -157,17 +159,34 @@ async function executeFullStack(): Promise<void> {
   }
 }
 
-async function executeEngineer(featureSpec: string): Promise<void> {
+async function executeEngineer(featureSpec: string, workspacePath?: string): Promise<void> {
   printPhaseHeader('ENGINEER', 'Autonomous Feature Engineer — 4-phase lifecycle');
   printInfo(`Spec: ${pc.bold(pc.italic(featureSpec))}`);
   console.log('');
 
-  const result = await runFeatureEngineer({ featureSpec });
+  // Resolve and confirm the external sandbox path before any code is written
+  const qaAgentRoot = process.cwd();
+  const defaultSandbox = resolveSandbox(qaAgentRoot, {
+    projectRoot: workspacePath,
+    featureSpec,
+  });
+
+  // Show the resolved path and let the user confirm / override it
+  const confirmedPath = await promptProjectWorkspace(defaultSandbox.projectRoot);
+  const finalSandbox = confirmedPath !== defaultSandbox.projectRoot
+    ? resolveSandbox(qaAgentRoot, { projectRoot: confirmedPath, featureSpec })
+    : defaultSandbox;
+
+  const result = await runFeatureEngineer({
+    featureSpec,
+    projectRoot: finalSandbox.projectRoot,
+  });
 
   if (result.finalState === 'COMPLETED') {
-    printSuccess('Feature delivered and all tests green');
+    printSuccess(`Feature delivered — project at: ${pc.cyan(result.projectRoot)}`);
   } else {
     printError(`Feature engineer ended in state: ${result.finalState}`);
+    printInfo(`Partial output at: ${result.projectRoot}`);
   }
 
   process.exit(result.finalState === 'COMPLETED' ? 0 : 1);
@@ -175,7 +194,7 @@ async function executeEngineer(featureSpec: string): Promise<void> {
 
 // ─── run command ──────────────────────────────────────────────────────────────
 
-async function handleRunCommand(intent?: TestingIntent, featurePrompt?: string): Promise<void> {
+async function handleRunCommand(intent?: TestingIntent, featurePrompt?: string, workspacePath?: string): Promise<void> {
   // ── Check core env keys (API key only) before showing the menu ────────────
   if (!intent) {
     await runEnvGuard(['core']);
@@ -228,7 +247,7 @@ async function handleRunCommand(intent?: TestingIntent, featurePrompt?: string):
 
     case 'engineer': {
       const spec = featurePrompt ?? (await promptFeatureSpec());
-      await executeEngineer(spec);
+      await executeEngineer(spec, workspacePath);
       break;
     }
   }
@@ -260,7 +279,7 @@ async function main(): Promise<void> {
 
   switch (parsed.command) {
     case 'run': {
-      await handleRunCommand(parsed.intent, parsed.featurePrompt);
+      await handleRunCommand(parsed.intent, parsed.featurePrompt, parsed.workspacePath);
       break;
     }
 
@@ -291,7 +310,7 @@ async function main(): Promise<void> {
         printError('Feature spec required. Example: tsx src/index.ts engineer "Add wishlist API"');
         process.exit(1);
       }
-      await executeEngineer(spec);
+      await executeEngineer(spec, parsed.workspacePath);
       break;
     }
 

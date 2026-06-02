@@ -1,253 +1,303 @@
-# Autonomous Full-Stack QA Agent
+# QA Feature Engineer Agent
 
-An autonomous QA agent for **Express backends**. It discovers routes, runs live HTTP tests against your running API, optionally auto-fixes failures with OpenRouter, and prints a summary of errors and fixes.
+An autonomous Node.js/TypeScript agent with two roles:
 
-For a deeper capability overview, see [docs/SQA_AGENT_CAPABILITIES.md](docs/SQA_AGENT_CAPABILITIES.md).
+1. **Feature Engineer** — Give it a plain-English spec. It writes full-stack code, generates a Playwright E2E test, runs it, and self-heals on failures.
+2. **QA Regression Agent** — Visual regression vs Figma, API test generation, and a self-healing patch loop for your running Express backend.
 
 ---
 
 ## Requirements
 
 - **Node.js 20+**
-- A **running Express API** (the agent sends real HTTP requests — it does not start your server)
-- An **[OpenRouter](https://openrouter.ai/) API key** (for LLM test generation and auto-fix)
+- An **[OpenRouter](https://openrouter.ai/) API key**
+- A **running backend** (for QA mode) — the agent sends real HTTP requests
+- Playwright Chromium (for E2E tests and UI regression)
 
 ---
 
-## Quick start
+## Quick Start
 
-### 1. Install dependencies
+### 1. Install
 
 ```bash
 npm install
-```
-
-Install Playwright browsers (only needed for UI/Figma regression):
-
-```bash
 npx playwright install chromium
 ```
 
-### 2. Configure environment
-
-Copy the example env file and add your OpenRouter credentials:
+### 2. Configure
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env`:
+Only one AI key is required — any supported provider:
 
 ```env
-OPENROUTER_API_KEY=your-key-here
-OPENROUTER_MODEL=anthropic/claude-sonnet-4
-AUTO_FIX_ON_FAILURE=true
+AI_API_KEY=your-key-here
 ```
 
-That is the minimum. Route paths and app URL are **auto-discovered** when you paste a backend into this repo (see below).
+Or use a provider-specific variable (`OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROQ_API_KEY`). The agent **auto-detects** the provider from the key prefix.
 
-### 3. Add your backend
+Everything else is auto-configured:
 
-Place any Express project in this directory, for example:
+| Variable | Auto-default |
+|----------|-------------|
+| `AI_MODEL` / `OPENROUTER_MODEL` | Per provider (e.g. `gemini-2.5-flash` for Google, `google/gemini-2.5-flash` for OpenRouter) |
+| `BASE_APP_URL` | `http://localhost:3001` |
+| `FRONTEND_APP_URL` | `http://localhost:5173` |
+| `ROUTES_DIR` | Auto-discovered from backend folder |
 
-```
-sqa/
-├── ecommerce-backend/     ← your API
-│   ├── src/routes/
-│   ├── package.json
-│   └── .env               ← PORT=3001 etc.
-├── src/                   ← QA agent (do not move)
-├── .env                   ← agent config
-└── README.md
-```
-
-Supported route locations (first match wins):
-
-- `src/routes`
-- `routes`
-- `src/api/routes`
-- `app/routes`
-
-The backend must list `express` in `package.json` dependencies.
-
-### 4. Start your backend
-
-In a **separate terminal**, run the target API:
+### 3. Run
 
 ```bash
-cd ecommerce-backend
-npm install
-npm run dev
+npm run start
 ```
 
-Confirm it responds (adjust port if needed):
+An interactive menu appears:
 
-```bash
-curl http://localhost:3001/health
 ```
-
-### 5. Run the agent
-
-```bash
-# Optional — see which backend was detected
-npm run discover
-
-# Full cycle: discover → test all routes → fix failures → summary
-npm run run
+? What do you want to do?
+  ❯ Engineer a feature
+    Run backend QA
+    Run frontend QA
+    Run full-stack QA
+    ⚙  Switch Active AI Model  [google/gemini-2.5-flash]
 ```
 
 ---
 
-## Commands
+## Feature Engineering
 
-| Command | Description |
-|---------|-------------|
-| `npm run run` | One full QA cycle (recommended) |
-| `npm run discover` | List Express backends found in this directory |
-| `npm run watch` | Re-run QA when route files change (2s debounce) |
-| `npm run webhook` | Start webhook server on port 4040 (`POST /webhook/ci`) |
-| `npm run typecheck` | TypeScript check |
-
-Equivalent direct invocation:
+The primary mode. Give the agent a feature spec and it handles everything:
 
 ```bash
+npx tsx src/index.ts engineer "Add a product reviews endpoint with star ratings"
+```
+
+Or via the interactive menu — select **Engineer a feature** and type your spec.
+
+### What happens
+
+```
+READING_CONTEXT  →  Load memory bank + check for drift + scan for duplicate files
+PHASE_1          →  LLM generates full-stack code (backend routes/services + frontend pages)
+COMPILING        →  tsc --noEmit gate (up to 3 attempts, auto-installs deps if needed)
+PHASE_2          →  LLM writes a Playwright E2E test for the feature
+PHASE_3          →  Playwright executes the test against your running app
+PHASE_4          →  Engineering report: dev log, test compliance, patch summary
+DEBUGGING        →  On test failure: LLM patches code, re-tests (up to 4 heal cycles)
+finally          →  progress.md appended + activeContext.md header stamped (always)
+```
+
+### Blank-canvas projects
+
+If no backend or frontend exists yet, the agent scaffolds one from scratch before generating:
+
+```
+backend demo/ecommerce-backend/   ← created automatically
+  ├── package.json
+  ├── tsconfig.json
+  └── src/index.ts                ← placeholder, replaced by LLM
+
+backend demo/ecommerce-frontend/  ← created automatically
+  ├── package.json
+  ├── tsconfig.json
+  └── src/app/page.tsx            ← placeholder, replaced by LLM
+```
+
+The LLM detects a blank canvas and generates a **complete application** rather than an incremental feature.
+
+---
+
+## QA Regression Mode
+
+Tests a running Express backend — discovers routes, generates test cases, runs them, and self-heals failures.
+
+```bash
+npx tsx src/index.ts run        # interactive menu → Backend / Frontend / Full-stack
+npx tsx src/index.ts watch      # re-run on route file changes (2s debounce)
+npx tsx src/index.ts webhook    # listen for CI triggers (POST /webhook/ci)
+```
+
+### What happens on backend QA
+
+1. Auto-discovers backend folder, `ROUTES_DIR`, and port
+2. Parses every Express route
+3. Generates test cases via OpenRouter (happy path, edge cases, auth, injection)
+4. Runs all tests via Axios
+5. On failure: patches the source file, compiles, retests (up to `MAX_PATCH_RETRIES`)
+6. Prints final report
+
+Example output:
+
+```
+────────────────── ERRORS FOUND & FIXES ──────────────────
+1. POST /api/v1/orders
+   Error   : Expected 201, got 400
+   File    : ecommerce-backend/src/services/orderService.ts
+   Outcome : fixed (1 attempt)
+
+        INTEGRATION TEST RUN — FINAL REPORT
+  Endpoints discovered  : 27
+  Tests passed          : 56
+  Tests failed          : 0
+```
+
+---
+
+## AI Model Hot-Swap
+
+Switch models at runtime without editing `.env`:
+
+```bash
+npx tsx src/index.ts run   →   select "⚙ Switch Active AI Model"
+```
+
+| Model | Slug |
+|-------|------|
+| Gemini 2.5 Flash *(default)* | `google/gemini-2.5-flash` |
+| Claude 3.5 Sonnet | `anthropic/claude-3.5-sonnet` |
+| GPT-4o Mini | `openai/gpt-4o-mini` |
+
+The selection is persisted to `.env` immediately and shown before every run.
+
+---
+
+## Memory Bank
+
+The agent maintains a persistent memory bank in two locations kept in sync automatically:
+
+```
+memory-bank/
+  ├── activeContext.md    ←  architecture notes + last run header (auto-stamped)
+  └── progress.md         ←  full run log (auto-appended after every run)
+
+.cursor/memory/
+  ├── activeContext.md    ←  mirror — always updated alongside memory-bank/
+  ├── progress.md         ←  mirror
+  ├── systemArchitecture.md
+  ├── systemPatterns.md
+  └── productContext.md
+```
+
+After every run — whether it succeeds, fails, or crashes — the `finally` block:
+- Appends a structured record to `progress.md` in **both** locations
+- Stamps the `Last updated` date and `Last run` outcome into `activeContext.md` in **both** locations
+
+At the start of every run the agent checks for drift between the two locations and warns if they have diverged.
+
+---
+
+## Duplicate File Detection
+
+At the start of every Feature Engineer run the agent scans `src/` for:
+
+- **Name collisions** — same filename appearing in different directories
+- **Content clones** — byte-identical files at different paths
+
+Findings are logged with `[DUPLICATE-DETECTOR]` prefix before any code generation begins, so the LLM never generates a conflicting second copy of an existing module.
+
+---
+
+## All Commands
+
+| Command | What it does |
+|---------|-------------|
+| `npm run start` | Interactive menu |
+| `npm run run` | Alias for interactive menu |
+| `npm run watch` | Re-run QA on route file changes |
+| `npm run webhook` | Webhook server (`POST /webhook/ci` on port 4040) |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run build` | `tsc` |
+
+Direct invocations:
+
+```bash
+npx tsx src/index.ts engineer "your feature spec"
 npx tsx src/index.ts run
-npx tsx src/index.ts discover
 npx tsx src/index.ts watch
 npx tsx src/index.ts webhook
 ```
 
 ---
 
-## What happens on `run`
+## Environment Variables
 
-1. **Auto-discover** — Finds your backend folder, `ROUTES_DIR`, `BASE_APP_URL` (from backend `PORT`), and `GIT_REPO_ROOT`.
-2. **Scan routes** — Parses every Express route in the routes directory.
-3. **Test** — Runs domain-ordered API tests (auth → catalog → cart/order) via live Axios calls.
-4. **E2E scenario** — If the API looks like an e-commerce app, runs signup → product → cart → order flows.
-5. **Auto-fix** — On failures where a **success response was expected** (or on **5xx**), patches the target file via OpenRouter, compiles, and retests (up to `MAX_PATCH_RETRIES`).
-6. **Report** — Prints **ERRORS FOUND & FIXES** and a **FINAL REPORT** to the console.
-
-Example final output:
-
-```
-────────────────── ERRORS FOUND & FIXES ──────────────────
-1. POST /api/v1/orders
-   Error    : Expected 201, got 400
-   File     : ecommerce-backend/src/services/orderService.ts
-   Outcome  : fixed (1 attempt(s))
-
-           INTEGRATION TEST RUN — FINAL REPORT
-  Endpoints discovered     : 27
-  Tests passed             : 56
-  Tests failed             : 0
-```
-
----
-
-## Environment variables
-
-### Required
+### Required (one AI key)
 
 | Variable | Description |
 |----------|-------------|
-| `OPENROUTER_API_KEY` | OpenRouter API key |
-| `OPENROUTER_MODEL` | Model id, e.g. `anthropic/claude-sonnet-4` |
+| `AI_API_KEY` | Any supported key (auto-detects provider) |
+| `OPENROUTER_API_KEY` | OpenRouter (`sk-or-…`) — legacy alias |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Google Gemini (`AIza…`) |
+| `OPENAI_API_KEY` | OpenAI (`sk-proj-…` / `sk-…`) |
+| `ANTHROPIC_API_KEY` | Anthropic Claude (`sk-ant-…`) |
+| `GROQ_API_KEY` | Groq (`gsk_…`) |
 
-### Auto-discovered (override if needed)
+### Auto-configured (override in `.env` if needed)
 
-| Variable | Description |
-|----------|-------------|
-| `ROUTES_DIR` | Path to Express route files |
-| `BASE_APP_URL` | Base URL of running API, e.g. `http://localhost:3001` |
-| `GIT_REPO_ROOT` | Root of the backend repo (where patches are written) |
-| `BACKEND_DIR` | Subfolder name when multiple backends exist, e.g. `ecommerce-backend` |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENROUTER_MODEL` | `google/gemini-2.5-flash` | LLM model slug |
+| `BASE_APP_URL` | `http://localhost:3001` | Backend URL |
+| `FRONTEND_APP_URL` | `http://localhost:5173` | Frontend URL |
+| `ROUTES_DIR` | Auto-discovered | Express routes directory |
+| `GIT_REPO_ROOT` | `process.cwd()` | Backend repo root for patches |
 
 ### Optional
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTO_FIX_ON_FAILURE` | `true` | Patch and retest when tests fail |
-| `MAX_PATCH_RETRIES` | `3` | Max patch attempts per failure |
+| `MAX_PATCH_RETRIES` | `3` | Max patch attempts per QA failure |
 | `FIGMA_API_TOKEN`, `FIGMA_FILE_KEY` | — | Enable UI regression vs Figma |
-| `FIGMA_ROUTE_MAP`, `FIGMA_SOURCE_MAP` | `{}` | UI route → Figma node / source file |
-| `GITHUB_TOKEN`, `GITHUB_REPO_*` | — | Open PR after verified fix |
+| `FIGMA_ROUTE_MAP`, `FIGMA_SOURCE_MAP` | `{}` | Route → Figma node mapping |
+| `GITHUB_TOKEN`, `GITHUB_REPO_*` | — | Open PR after a verified fix |
 | `WEBHOOK_PORT` | `4040` | Webhook server port |
 
 ---
 
-## Example: ecommerce-backend
+## Project Structure
 
-This repo includes a sample backend at `ecommerce-backend/`.
-
-**Terminal 1 — API**
-
-```bash
-cd ecommerce-backend
-npm run dev
 ```
+src/
+├── index.ts                        CLI entry point
+├── cli/
+│   ├── banner.ts                   Colored terminal output
+│   ├── envGuard.ts                 Interactive env prompts
+│   ├── menu.ts                     Intent selection menu
+│   └── modelConfig.ts              AI model default + hot-swap
+├── orchestrator/
+│   ├── selfEvolution.ts            Meta-review + self-patch loop
+│   └── featureEngineer/
+│       ├── fsm.ts                  FSM state machine
+│       ├── types.ts                Shared interfaces + constants
+│       ├── logging.ts              Phase-specific log helpers
+│       ├── memoryBank.ts           Dual-location memory read/write + drift check
+│       ├── duplicateDetector.ts    Name collision + content clone scan
+│       ├── projectScaffolder.ts    Blank-canvas bootstrap
+│       ├── compilerSandbox.ts      tsc guard + rollback
+│       ├── repoAnalyzer.ts         isBlankCanvas detection
+│       ├── openRouterPhases.ts     LLM prompts (dev + heal)
+│       ├── codeAnchors.ts          Code injection with anchor matching
+│       ├── phase1Development.ts    Apply generated code files
+│       ├── phase2TestGen.ts        Generate Playwright E2E test
+│       ├── phase3Runner.ts         Execute test, parse results
+│       └── phase4Report.ts         Engineering report
+├── api/                            Route parsing, test gen, test runner
+├── ui/
+│   ├── generated/                  Dynamic E2E tests (auto-written per feature)
+│   ├── screenshot.ts
+│   ├── figma.ts
+│   ├── pixelDiff.ts
+│   └── semanticDiff.ts
+├── patcher/                        Bug fixing + retry loop
+├── trigger/                        File watcher + webhook server
+└── utils/                          Config (zod), types, logger
 
-**Terminal 2 — QA agent**
-
-```bash
-cd ..
-npm run run
+memory-bank/                        Auto-updated after every run
+.cursor/memory/                     Mirror — always kept in sync with memory-bank/
 ```
-
-If port 3000 is busy, set `PORT=3001` in `ecommerce-backend/.env`. The agent reads that port during auto-discovery. You can also set explicitly in the agent `.env`:
-
-```env
-BASE_APP_URL=http://localhost:3001
-BACKEND_DIR=ecommerce-backend
-```
-
----
-
-## Multiple backends
-
-If more than one Express app exists in this directory, the agent uses the **first** one found. Pin a specific app:
-
-```env
-BACKEND_DIR=my-api
-```
-
-Or set paths manually:
-
-```env
-ROUTES_DIR=my-api/src/routes
-BASE_APP_URL=http://localhost:4000
-GIT_REPO_ROOT=my-api
-```
-
----
-
-## Watch mode (development)
-
-Re-run the full QA cycle whenever route files change:
-
-```bash
-npm run watch
-```
-
-Requires `ROUTES_DIR` (auto-discovered on first `run` or set in `.env`). Keep your backend server running.
-
----
-
-## Webhook mode (CI)
-
-Start the webhook listener:
-
-```bash
-npm run webhook
-```
-
-Trigger a QA cycle from CI:
-
-```bash
-curl -X POST http://localhost:4040/webhook/ci
-```
-
-Returns `202 Accepted` immediately; the cycle runs in the background.
 
 ---
 
@@ -255,27 +305,14 @@ Returns `202 Accepted` immediately; the cycle runs in the background.
 
 | Problem | Fix |
 |---------|-----|
-| `ROUTES_DIR is required` | Paste a backend with route files, or run `npm run discover`, or set `ROUTES_DIR` in `.env` |
-| `Server unreachable` / status `0` | Start your backend; check `BASE_APP_URL` and port |
-| OpenRouter `402` credits | Add credits at [openrouter.ai/settings/credits](https://openrouter.ai/settings/credits) — tests still run with smoke/flow fallback; auto-fix needs credits |
-| MongoDB / DB connection failed | Start database or fix backend `.env` (agent tests the API, not the DB directly) |
-| Patches not picked up | Use a dev server with hot reload (`tsx watch`, `nodemon`) or restart the backend after patches |
-| Wrong backend selected | Set `BACKEND_DIR` in agent `.env` |
-
----
-
-## Project layout
-
-```
-src/
-├── index.ts              CLI entry
-├── orchestrator.ts       Wires UI + API phases
-├── api/                  Route parsing, tests, E2E, auto-heal, reports
-├── patcher/              OpenRouter patches + retry loop
-├── trigger/              File watcher + webhook
-├── ui/                   Playwright + Figma (optional)
-└── utils/                Config, logger, backend discovery
-```
+| No AI API key | Add `AI_API_KEY` or a provider-specific key to `.env` |
+| `Server unreachable` | Start your backend; verify `BASE_APP_URL` in `.env` |
+| `tsc --noEmit` fails on generated code | Agent retries up to 3 times; check `[COMPILING]` log for the specific error |
+| OpenRouter `402` | Add credits at [openrouter.ai/settings/credits](https://openrouter.ai/settings/credits) |
+| Wrong backend selected | Set `ROUTES_DIR` and `BASE_APP_URL` explicitly in `.env` |
+| Memory bank drift warning | The two locations have diverged — copy the newer file to the other location |
+| Duplicate file warning | Remove the stale copy before the next feature run |
+| Patches not applied | Use a dev server with hot reload (`tsx watch`, `nodemon`) or restart after patches |
 
 ---
 

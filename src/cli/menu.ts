@@ -4,6 +4,8 @@
  * utility helpers for argument-based intent detection.
  */
 
+import path from 'node:path';
+
 import { select, confirm } from '@inquirer/prompts';
 import pc from 'picocolors';
 
@@ -61,6 +63,8 @@ export interface ParsedArgs {
   command: string;
   intent?: TestingIntent;
   featurePrompt?: string;
+  /** Absolute path for the external project workspace (--workspace flag) */
+  workspacePath?: string;
   flags: Set<string>;
 }
 
@@ -69,18 +73,20 @@ export function parseCliArgs(argv: string[]): ParsedArgs {
   const command = rawCommand.toLowerCase();
   const flags = new Set<string>();
   const extra: string[] = [];
+  let workspacePath: string | undefined;
 
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i] ?? '';
     if (arg === '--backend') { flags.add('backend'); }
     else if (arg === '--frontend') { flags.add('frontend'); }
     else if (arg === '--full-stack' || arg === '--fullstack') { flags.add('fullstack'); }
+    else if (arg === '--workspace' || arg === '-w') {
+      const val = rest[i + 1] ?? '';
+      if (val && !val.startsWith('-')) { workspacePath = val; i++; }
+    }
     else if (arg === '--prompt' || arg === '-p') {
       const val = rest[i + 1] ?? '';
-      if (val && !val.startsWith('-')) {
-        extra.push(val);
-        i++;
-      }
+      if (val && !val.startsWith('-')) { extra.push(val); i++; }
       flags.add('prompt');
     } else if (arg) {
       extra.push(arg);
@@ -95,7 +101,7 @@ export function parseCliArgs(argv: string[]): ParsedArgs {
   else if (flags.has('fullstack')) intent = 'fullstack';
   else if (flags.has('prompt') || featurePrompt) intent = 'engineer';
 
-  return { command, intent, featurePrompt, flags };
+  return { command, intent, featurePrompt, workspacePath, flags };
 }
 
 // ─── Interactive menu ─────────────────────────────────────────────────────────
@@ -128,6 +134,32 @@ export async function promptFeatureSpec(prefill?: string): Promise<string> {
     validate: (v) => (v.trim().length >= 10 ? true : 'Please describe the feature in at least 10 characters'),
   });
   return spec.trim();
+}
+
+/**
+ * Prompt the user to confirm or customise the external project workspace path.
+ *
+ * @param defaultPath  The path derived from the feature-spec slug (shown as default)
+ * @returns  Absolute path the user confirmed or typed
+ */
+export async function promptProjectWorkspace(defaultPath: string): Promise<string> {
+  const { input } = await import('@inquirer/prompts');
+
+  console.log('');
+  console.log(pc.bold('  External Project Workspace'));
+  console.log(pc.dim('  Generated code lives OUTSIDE the agent directory.\n'));
+
+  const answer = await input({
+    message: `${pc.cyan('Project folder')}  ${pc.dim('(press Enter to accept default)')}`,
+    default: defaultPath,
+    validate: (v) => {
+      const trimmed = v.trim();
+      if (!trimmed) return 'Path cannot be empty';
+      if (!path.isAbsolute(trimmed)) return 'Please enter an absolute path';
+      return true;
+    },
+  });
+  return answer.trim();
 }
 
 export async function promptConfirmFullStack(): Promise<boolean> {

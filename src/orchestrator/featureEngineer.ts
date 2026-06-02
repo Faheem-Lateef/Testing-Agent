@@ -4,7 +4,6 @@ import { loadConfig, resetConfigCache } from '../utils/config.js';
 import {
   formatCompileFailures,
   gitRollbackWorkspace,
-  pathExists,
   verifyAllTargets,
 } from './featureEngineer/compilerSandbox.js';
 import { FeatureEngineerFsm } from './featureEngineer/fsm.js';
@@ -12,16 +11,19 @@ import { engineerLog, phaseLog } from './featureEngineer/logging.js';
 import {
   loadMemoryBankSync,
   loadProjectMemoryBank,
-  writeProgressLog,
   checkMemoryDrift,
-  refreshActiveContextHeader,
+  initProjectMemoryBank,
+  finalizeAgentMemoryUpdate,
+  finalizeProjectMemoryUpdate,
 } from './featureEngineer/memoryBank.js';
 import { detectAgentDuplicates } from './featureEngineer/duplicateDetector.js';
 import {
-  scaffoldWorkspaceIfBlank,
-  DEFAULT_BACKEND_URL,
-  DEFAULT_FRONTEND_URL,
-} from './featureEngineer/projectScaffolder.js';
+  resolveSandbox,
+  bootstrapSandboxDirs,
+  writeProjectEnv,
+  logSandboxLocked,
+} from './featureEngineer/sandbox.js';
+import { scaffoldWorkspaceIfBlank } from './featureEngineer/projectScaffolder.js';
 import { runFullStackDevelopmentPhase, runSelfHealAnalysisPhase } from './featureEngineer/openRouterPhases.js';
 import { applyDevelopmentFiles, applyHealFix } from './featureEngineer/phase1Development.js';
 import { generateFeatureTest } from './featureEngineer/phase2TestGen.js';
@@ -46,46 +48,7 @@ export {
   MAX_EVOLUTION_ATTEMPTS,
 } from './featureEngineer/types.js';
 export type { AgentState, FeatureEngineerOptions, FeatureEngineerResult } from './featureEngineer/types.js';
-
-interface WorkspaceRoots {
-  backendRoot: string;
-  frontendRoot: string;
-  qaAgentRoot: string;
-}
-
-async function resolveWorkspaceRoots(options: FeatureEngineerOptions): Promise<WorkspaceRoots> {
-  const config = loadConfig();
-  const qaAgentRoot = process.cwd();
-
-  const candidates = [
-    options.backendRoot,
-    path.resolve(qaAgentRoot, 'backend demo', 'ecommerce-backend'),
-    path.resolve(qaAgentRoot, '../ecommerce-backend'),
-    config.GIT_REPO_ROOT,
-  ].filter(Boolean) as string[];
-
-  let backendRoot = path.resolve(candidates[0] ?? config.GIT_REPO_ROOT);
-  for (const c of candidates) {
-    const resolved = path.resolve(c);
-    if (await pathExists(path.join(resolved, 'package.json'))) {
-      backendRoot = resolved;
-      break;
-    }
-  }
-
-  const siblingFrontend = path.join(path.dirname(backendRoot), 'ecommerce-frontend');
-  const demoFrontend = path.resolve(qaAgentRoot, 'backend demo', 'ecommerce-frontend');
-  let frontendRoot = options.frontendRoot
-    ? path.resolve(options.frontendRoot)
-    : (await pathExists(siblingFrontend))
-      ? siblingFrontend
-      : demoFrontend;
-
-  engineerLog(`Backend: ${backendRoot}`);
-  engineerLog(`Frontend: ${frontendRoot}`);
-
-  return { backendRoot, frontendRoot, qaAgentRoot };
-}
+export type { SandboxConfig } from './featureEngineer/sandbox.js';
 
 function mergeChanges(target: FileChangeRecord[], incoming: FileChangeRecord[]): void {
   for (const c of incoming) {
@@ -100,60 +63,62 @@ function mergeChanges(target: FileChangeRecord[], incoming: FileChangeRecord[]):
 /**
  * Autonomous Feature Engineer — Developer + Tester + Self-Healing Debugger.
  *
- * PHASE 1: Full-stack development + compile guard
+ * PHASE 1: Full-stack development + compile guard (external project sandbox)
  * PHASE 2: Dynamic Playwright test in src/ui/generated/
  * PHASE 3: Live re-test with up to 4 heal cycles
- * PHASE 4: Engineering report
+ * PHASE 4: Engineering report + external project memory bank update
  */
 export async function runFeatureEngineer(
   options: FeatureEngineerOptions,
 ): Promise<FeatureEngineerResult> {
-  // ── GUARANTEED INIT: sync cold-boot memory load ────────────────────────
-  // Runs as the ABSOLUTE FIRST operation using fs.readFileSync so the
-  // memory bank is available before any async I/O, LLM calls, or FSM setup.
   const qaAgentRoot = process.cwd();
+
+  // ── STEP 0: Sync cold-boot memory read (agent's own context) ─────────────
+  // readFileSync — guaranteed before any async I/O or LLM calls.
   const syncMemory = loadMemoryBankSync(qaAgentRoot);
 
-  // ── STEP 1: Inject URL/path defaults before any loadConfig() call ────────
-  // This guarantees blank-canvas runs never crash on missing ROUTES_DIR.
-  const defaultBackendPath = path.resolve(qaAgentRoot, 'backend demo', 'ecommerce-backend');
-  const defaultFrontendPath = path.resolve(qaAgentRoot, 'backend demo', 'ecommerce-frontend');
+  // ── STEP 1: Resolve external sandbox ─────────────────────────────────────
+  // All generated code lives OUTSIDE the agent directory — never nested inside.
+  const sandbox = resolveSandbox(qaAgentRoot, {
+    projectRoot: options.projectRoot,
+    featureSpec: options.featureSpec,
+  });
 
-  if (!process.env['ROUTES_DIR']?.trim()) {
-    const routesCandidate = path.join(options.backendRoot ?? defaultBackendPath, 'src', 'routes');
-    process.env['ROUTES_DIR'] = routesCandidate;
-    engineerLog(`[BLANK-CANVAS] ROUTES_DIR → ${routesCandidate}`);
-  }
-  if (!process.env['BASE_APP_URL']?.trim()) {
-    process.env['BASE_APP_URL'] = DEFAULT_BACKEND_URL;
-    engineerLog(`[BLANK-CANVAS] BASE_APP_URL → ${DEFAULT_BACKEND_URL}`);
-  }
-  if (!process.env['FRONTEND_APP_URL']?.trim()) {
-    process.env['FRONTEND_APP_URL'] = DEFAULT_FRONTEND_URL;
-    engineerLog(`[BLANK-CANVAS] FRONTEND_APP_URL → ${DEFAULT_FRONTEND_URL}`);
-  }
-  if (!process.env['GIT_REPO_ROOT']?.trim()) {
-    process.env['GIT_REPO_ROOT'] = options.backendRoot ?? defaultBackendPath;
-    engineerLog(`[BLANK-CANVAS] GIT_REPO_ROOT → ${process.env['GIT_REPO_ROOT']}`);
-  }
-  // Reset cache so loadConfig() picks up the injected defaults
+  logSandboxLocked(sandbox);
+
+  // Bootstrap directories + write the project's own .env
+  bootstrapSandboxDirs(sandbox);
+  writeProjectEnv(sandbox);
+
+  // Seed the project's standalone memory bank (creates files only if absent)
+  initProjectMemoryBank(sandbox.projectRoot, sandbox.projectSlug);
+
+  // ── STEP 2: Inject env defaults pointing at the EXTERNAL sandbox ──────────
+  process.env['ROUTES_DIR']      = path.join(sandbox.backendRoot, 'src', 'routes');
+  process.env['BASE_APP_URL']    = 'http://localhost:3001';
+  process.env['FRONTEND_APP_URL']= 'http://localhost:5173';
+  process.env['GIT_REPO_ROOT']   = sandbox.backendRoot;
   resetConfigCache();
 
-  const fsm = new FeatureEngineerFsm();
-  const roots = await resolveWorkspaceRoots(options);
+  engineerLog(`[EXTERNAL-SANDBOX] ROUTES_DIR      → ${process.env['ROUTES_DIR']}`);
+  engineerLog(`[EXTERNAL-SANDBOX] BASE_APP_URL    → ${process.env['BASE_APP_URL']}`);
+  engineerLog(`[EXTERNAL-SANDBOX] FRONTEND_APP_URL→ ${process.env['FRONTEND_APP_URL']}`);
+  engineerLog(`[EXTERNAL-SANDBOX] GIT_REPO_ROOT   → ${process.env['GIT_REPO_ROOT']}`);
 
-  // ── STEP 2: Dynamic project scaffolding (mkdirSync + baseline files) ─────
-  // Creates backend/frontend directory trees and installs the TypeScript
-  // toolchain so the compilation sandbox never throws ENOENT on a blank run.
-  const scaffold = scaffoldWorkspaceIfBlank(roots.backendRoot, roots.frontendRoot);
+  const fsm = new FeatureEngineerFsm();
+  const backendRoot  = sandbox.backendRoot;
+  const frontendRoot = sandbox.frontendRoot;
+
+  // ── STEP 3: Scaffold blank project trees inside the external sandbox ──────
+  const scaffold = scaffoldWorkspaceIfBlank(backendRoot, frontendRoot);
   if (scaffold.isBlankCanvas) {
-    // Re-inject ROUTES_DIR with the confirmed backend root after scaffold
-    process.env['ROUTES_DIR'] = path.join(roots.backendRoot, 'src', 'routes');
+    process.env['ROUTES_DIR'] = path.join(backendRoot, 'src', 'routes');
     resetConfigCache();
-    engineerLog(`[BLANK-CANVAS] Scaffold complete — backend: ${roots.backendRoot} | frontend: ${roots.frontendRoot}`);
+    engineerLog(`[EXTERNAL-SANDBOX] Scaffold complete — ${backendRoot} | ${frontendRoot}`);
   }
 
-  const config = loadConfig();
+  loadConfig();
+  const frontendAppUrl = 'http://localhost:5173';
   const fileChanges: FileChangeRecord[] = [];
   const healCycles: HealCycleRecord[] = [];
   const compileAttempts: FeatureEngineerResult['attempts'] = [];
@@ -173,23 +138,22 @@ export async function runFeatureEngineer(
 
     fsm.transition('READING_CONTEXT', 'Memory bank + repository analysis');
 
-    // Run memory drift check and duplicate file scan in parallel before
-    // any generation — catching stale/diverged context before the LLM sees it.
+    // Drift check + dup scan on the AGENT source (qa-agent src/) only.
+    // External project duplication is handled per-run by the sandbox logic.
     const [memoryBank, , dupReport] = await Promise.all([
-      loadProjectMemoryBank(roots.qaAgentRoot).then((mb) => mb ?? syncMemory),
-      checkMemoryDrift(roots.qaAgentRoot),
-      detectAgentDuplicates(roots.qaAgentRoot),
+      loadProjectMemoryBank(qaAgentRoot).then((mb) => mb ?? syncMemory),
+      checkMemoryDrift(qaAgentRoot),
+      detectAgentDuplicates(qaAgentRoot),
     ]);
 
     if (!dupReport.clean) {
       engineerLog(
-        `⚠ Workspace has ${dupReport.totalIssues} duplicate file issue(s) — ` +
+        `⚠ Agent workspace has ${dupReport.totalIssues} duplicate file issue(s) — ` +
         `review [DUPLICATE-DETECTOR] log above before proceeding`,
       );
     }
 
-    const repo = await analyzeRepositories(roots.backendRoot, roots.frontendRoot);
-    // Merge scaffold detection with repo analysis for coherent blank-canvas flag
+    const repo = await analyzeRepositories(backendRoot, frontendRoot);
     const isBlankCanvas = scaffold.isBlankCanvas || repo.isBlankCanvas;
 
     // ─── PHASE 1: FULL-STACK DEVELOPMENT ─────────────────────────────────
@@ -210,14 +174,14 @@ export async function runFeatureEngineer(
         isBlankCanvas,
       );
 
-      const applied = await applyDevelopmentFiles(roots.backendRoot, roots.frontendRoot, dev);
+      const applied = await applyDevelopmentFiles(backendRoot, frontendRoot, dev);
       mergeChanges(fileChanges, applied);
 
       fsm.transition('COMPILING', 'Validate backend + frontend + qa-agent');
       const compileResults = await verifyAllTargets(
-        roots.backendRoot,
-        roots.frontendRoot,
-        roots.qaAgentRoot,
+        backendRoot,
+        frontendRoot,
+        qaAgentRoot,
       );
       compileAttempts.push({ attempt, state: 'COMPILING', compileResults });
 
@@ -231,8 +195,8 @@ export async function runFeatureEngineer(
       const heal = await runSelfHealAnalysisPhase(priorErrors, memoryBank, repo.summary);
       if (heal.bugFound && heal.fixedInjectedCode) {
         const fix = await applyHealFix(
-          roots.backendRoot,
-          roots.frontendRoot,
+          backendRoot,
+          frontendRoot,
           heal.targetFile,
           heal.fixedInjectedCode,
           heal.replaceEntireFile,
@@ -242,8 +206,8 @@ export async function runFeatureEngineer(
 
       if (attempt >= MAX_COMPILE_ATTEMPTS) {
         fsm.forceFailed('Phase 1 compile guard failed after max attempts');
-        gitRollbackWorkspace(roots.backendRoot);
-        gitRollbackWorkspace(roots.frontendRoot);
+        gitRollbackWorkspace(backendRoot);
+        gitRollbackWorkspace(frontendRoot);
         const report = printEngineeringReport({
           featureSpec: options.featureSpec,
           phase: currentPhase,
@@ -267,6 +231,7 @@ export async function runFeatureEngineer(
           attempts: compileAttempts,
           memoryBank,
           engineeringReport: report,
+          projectRoot: sandbox.projectRoot,
           diagnosticReport: report,
         };
         return result;
@@ -298,6 +263,7 @@ export async function runFeatureEngineer(
         attempts: compileAttempts,
         memoryBank,
         engineeringReport: report,
+        projectRoot: sandbox.projectRoot,
         diagnosticReport: report,
       };
       return result;
@@ -312,20 +278,20 @@ export async function runFeatureEngineer(
       options.featureSpec,
       memoryBank,
       repo.summary,
-      roots.qaAgentRoot,
-      config.FRONTEND_APP_URL,
+      qaAgentRoot,
+      frontendAppUrl,
     );
 
     mergeChanges(fileChanges, [
       {
         repo: 'qa-agent',
-        relativePath: path.relative(roots.qaAgentRoot, generatedTestPath),
+        relativePath: path.relative(qaAgentRoot, generatedTestPath),
         absolutePath: generatedTestPath,
         action: 'created',
       },
     ]);
 
-    const qaCompile = await verifyAllTargets(roots.backendRoot, roots.frontendRoot, roots.qaAgentRoot);
+    const qaCompile = await verifyAllTargets(backendRoot, frontendRoot, qaAgentRoot);
     if (!qaCompile.find((r) => r.project === 'qa-agent')?.success) {
       phaseLog('PHASE_2_TEST_ARCHITECTURE', 'Generated test typecheck failed — continuing to Phase 3');
     }
@@ -364,14 +330,14 @@ export async function runFeatureEngineer(
           `${options.featureSpec}\n\nFix test errors:\n${debug.rootCause}\n${debug.fixedInjectedCode}`,
           memoryBank,
           repo.summary,
-          roots.qaAgentRoot,
-          config.FRONTEND_APP_URL,
+          qaAgentRoot,
+          frontendAppUrl,
         );
         record.fixesApplied.push(`regenerated test: ${generatedTestPath}`);
       } else if (debug.bugFound && debug.fixedInjectedCode) {
         const fix = await applyHealFix(
-          roots.backendRoot,
-          roots.frontendRoot,
+          backendRoot,
+          frontendRoot,
           debug.targetFile,
           debug.fixedInjectedCode,
           debug.replaceEntireFile,
@@ -382,9 +348,9 @@ export async function runFeatureEngineer(
         }
         fsm.transition('COMPILING', 'Re-verify after heal patch');
         const recompile = await verifyAllTargets(
-          roots.backendRoot,
-          roots.frontendRoot,
-          roots.qaAgentRoot,
+          backendRoot,
+          frontendRoot,
+          qaAgentRoot,
         );
         if (!recompile.every((r) => r.success)) {
           priorErrors = formatCompileFailures(recompile);
@@ -394,8 +360,8 @@ export async function runFeatureEngineer(
 
       if (cycle >= MAX_HEAL_ATTEMPTS) {
         phaseLog('PHASE_3_SELF_HEALING', 'Heal cycles exhausted — proceeding to report');
-        gitRollbackWorkspace(roots.backendRoot);
-        gitRollbackWorkspace(roots.frontendRoot);
+        gitRollbackWorkspace(backendRoot);
+        gitRollbackWorkspace(frontendRoot);
         break;
       }
     }
@@ -436,6 +402,7 @@ export async function runFeatureEngineer(
       attempts: compileAttempts,
       memoryBank,
       engineeringReport: report,
+      projectRoot: sandbox.projectRoot,
       diagnosticReport: report,
     };
 
@@ -443,13 +410,11 @@ export async function runFeatureEngineer(
 
   } finally {
     // ── GUARANTEED FINALIZATION ────────────────────────────────────────────
-    // Both calls below execute whether the try completes, returns early, or
-    // throws — so no run is ever left unrecorded and no memory file goes stale.
+    // Both the EXTERNAL project memory-bank/ AND the agent's own memory dirs
+    // must be updated on every run — success or failure.
     const succeeded = result?.finalState === 'COMPLETED';
     const finalState = result?.finalState ?? fsm.current;
-
-    // 1. Append full run record to progress.md in BOTH memory locations
-    await writeProgressLog({
+    const sharedParams = {
       commandType: 'feature-engineer',
       featureSpec: options.featureSpec,
       success: succeeded,
@@ -457,15 +422,12 @@ export async function runFeatureEngineer(
       fileChanges: result?.fileChanges ?? fileChanges,
       healCycles: result?.healCycles ?? healCycles,
       generatedTestPath: result?.generatedTestPath ?? generatedTestPath,
-      qaAgentRoot,
-    });
+    };
 
-    // 2. Stamp "Last updated" + "Last run" header in activeContext.md in BOTH locations
-    refreshActiveContextHeader(
-      qaAgentRoot,
-      options.featureSpec,
-      succeeded ? 'SUCCESS' : 'FAILED',
-      finalState,
-    );
+    // External project memory (isolated sandbox — never writes into agent repo)
+    finalizeProjectMemoryUpdate({ ...sharedParams, projectRoot: sandbox.projectRoot });
+
+    // Agent memory (memory-bank/ + .cursor/memory/ — always both)
+    await finalizeAgentMemoryUpdate({ ...sharedParams, qaAgentRoot });
   }
 }

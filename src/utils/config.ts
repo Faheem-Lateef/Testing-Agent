@@ -4,12 +4,28 @@ import { z } from 'zod';
 
 import { logger } from './logger.js';
 import type { FigmaRouteMap } from './types.js';
+import {
+  createAIClient,
+  getActiveModelFromEnv,
+  normalizeModelForProvider,
+  resolveApiKeyFromEnv,
+  resolveProviderProfile,
+  type AIProvider,
+  type ProviderProfile,
+} from './providerRouter.js';
 
 const envSchema = z.object({
-  OPENROUTER_API_KEY: z.string().min(1, 'is required'),
-  // Default applied by applyModelDefault() before loadConfig() is ever called.
-  // Schema uses a safe fallback so loadConfig() never crashes on missing model.
-  OPENROUTER_MODEL: z.string().default('google/gemini-2.5-flash'),
+  AI_PROVIDER: z.string().optional(),
+  AI_API_KEY: z.string().optional(),
+  AI_MODEL: z.string().optional(),
+  OPENROUTER_API_KEY: z.string().optional(),
+  GOOGLE_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.string().optional(),
+  GROQ_API_KEY: z.string().optional(),
+  // Legacy name — kept for backward compatibility with existing .env files
+  OPENROUTER_MODEL: z.string().optional(),
   BASE_APP_URL: z.string().url('must be a valid URL').optional(),
   FRONTEND_APP_URL: z.string().url('must be a valid URL').optional(),
   E2E_MOBILE_VIEWPORT: z
@@ -46,6 +62,14 @@ export type AppConfig = Omit<
   GIT_REPO_ROOT: string;
   hasFigma: boolean;
   hasGit: boolean;
+  /** Resolved LLM provider (from key shape or AI_PROVIDER) */
+  aiProvider: AIProvider;
+  aiApiKey: string;
+  /** Model slug normalized for the active provider */
+  aiModel: string;
+  /** @deprecated Use aiModel — same value, kept for existing call sites */
+  OPENROUTER_MODEL: string;
+  providerProfile: ProviderProfile;
 };
 
 let cached: AppConfig | null = null;
@@ -88,6 +112,24 @@ export function loadConfig(): AppConfig {
     process.exit(1);
   }
 
+  if (!resolveApiKeyFromEnv()) {
+    logger.fatal(
+      'No AI API key found. Set AI_API_KEY (auto-detects provider) or OPENROUTER_API_KEY, ' +
+        'GOOGLE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, or GROQ_API_KEY',
+    );
+    process.exit(1);
+  }
+
+  let providerProfile: ProviderProfile;
+  try {
+    providerProfile = resolveProviderProfile();
+  } catch (err) {
+    logger.fatal({ err }, String(err));
+    process.exit(1);
+  }
+
+  const aiModel = getActiveModelFromEnv(providerProfile);
+
   let routesDir = result.data.ROUTES_DIR;
   let baseAppUrl = result.data.BASE_APP_URL ?? 'http://localhost:3000';
   let frontendAppUrl = result.data.FRONTEND_APP_URL ?? baseAppUrl;
@@ -115,13 +157,19 @@ export function loadConfig(): AppConfig {
     GIT_REPO_ROOT: gitRepoRoot,
     hasFigma: !!process.env['FIGMA_API_TOKEN'] && !!process.env['FIGMA_FILE_KEY'],
     hasGit: !!process.env['GITHUB_TOKEN'],
+    aiProvider: providerProfile.provider,
+    aiApiKey: providerProfile.apiKey,
+    aiModel,
+    OPENROUTER_MODEL: aiModel,
+    providerProfile,
   };
 
   logger.debug(
     {
       baseAppUrl: cached.BASE_APP_URL,
       routesDir: cached.ROUTES_DIR,
-      openrouterModel: cached.OPENROUTER_MODEL,
+      aiProvider: cached.aiProvider,
+      aiModel: cached.aiModel,
       hasFigma: cached.hasFigma,
       hasGit: cached.hasGit,
     },
@@ -131,24 +179,30 @@ export function loadConfig(): AppConfig {
   return cached;
 }
 
+/** Create LLM client for the resolved provider (OpenRouter, Gemini, OpenAI, Groq, or Anthropic). */
 export function createOpenRouterClient(config: AppConfig): OpenAI {
-  return new OpenAI({
-    apiKey: config.OPENROUTER_API_KEY,
-    baseURL: 'https://openrouter.ai/api/v1',
-    defaultHeaders: {
-      'HTTP-Referer': 'http://localhost:3000',
-      'X-Title': 'Swiftlane QA Agent',
-    },
-  });
+  return createAIClient(config.providerProfile) as unknown as OpenAI;
 }
 
 export function handleOpenRouterAuthError(err: unknown): never {
-  if (err instanceof OpenAI.APIError && (err.status === 401 || err.status === 403)) {
-    logger.error({ service: 'openrouter', status: err.status }, 'Fatal auth error — check OPENROUTER_API_KEY');
+  const status =
+    err instanceof OpenAI.APIError
+      ? err.status
+      : typeof err === 'object' && err !== null && 'status' in err
+        ? Number((err as { status: number }).status)
+        : undefined;
+
+  if (status === 401 || status === 403) {
+    logger.error(
+      { status },
+      'Fatal auth error — check your API key (AI_API_KEY or provider-specific key in .env)',
+    );
     process.exit(1);
   }
   throw err;
 }
+
+export { normalizeModelForProvider, resolveProviderProfile, type AIProvider, type ProviderProfile };
 
 export function extractCompletionText(content: string | null | undefined, context: string): string {
   if (!content || typeof content !== 'string') {

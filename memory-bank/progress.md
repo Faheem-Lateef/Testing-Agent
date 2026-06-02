@@ -61,3 +61,17 @@
   - `printActiveModelLine()` shown before every intent badge
 
 ---
+
+## [2026-06-03 00:00:00] milestone: Multi-provider AI routing
+
+- **Outcome**: SUCCESS ✓
+- **FSM State**: `COMPLETED`
+
+### Changes Introduced
+- [qa-agent] created: `src/utils/providerRouter.ts` — auto-detect OpenRouter / Google / OpenAI / Groq / Anthropic from key prefix
+- [qa-agent] modified: `src/utils/config.ts` — any of 7 key env vars; `createOpenRouterClient()` routes to correct API
+- [qa-agent] modified: `src/cli/modelConfig.ts` — per-provider model menu + `AI_MODEL` persistence
+- [qa-agent] modified: `src/cli/envGuard.ts` — prompts `AI_API_KEY` (universal) instead of OpenRouter-only
+- [qa-agent] modified: `.env.example`, `README.md` — multi-provider setup docs
+
+---

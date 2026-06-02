@@ -114,7 +114,15 @@ export interface HealCycleRecord {
 
 export interface FeatureEngineerOptions {
   featureSpec: string;
+  /**
+   * Absolute path to the external project root (outside the agent directory).
+   * When omitted the sandbox derives a sibling path from the featureSpec slug.
+   * e.g. D:\sqa agent + spec "Build car rental" → D:\car-rental
+   */
+  projectRoot?: string;
+  /** @deprecated Pass projectRoot instead. Kept for backward compat. */
   backendRoot?: string;
+  /** @deprecated Pass projectRoot instead. Kept for backward compat. */
   frontendRoot?: string;
   skipPlaywright?: boolean;
 }
@@ -139,6 +147,8 @@ export interface FeatureEngineerResult {
   attempts: FeatureEngineerAttempt[];
   memoryBank: ProjectMemoryBank | null;
   engineeringReport: string;
+  /** Absolute path of the external project sandbox root */
+  projectRoot: string;
   /** @deprecated */
   diagnosticReport: string;
 }

@@ -12,7 +12,10 @@ export async function verifyOpenRouterConnection(): Promise<void> {
   const config = loadConfig();
   const openai = createOpenRouterClient(config);
 
-  logger.info({ model: config.OPENROUTER_MODEL }, 'Verifying OpenRouter API connectivity');
+  logger.info(
+    { model: config.aiModel, provider: config.aiProvider },
+    'Verifying AI provider connectivity',
+  );
 
   try {
     const response = await openai.chat.completions.create({

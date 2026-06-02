@@ -10,6 +10,8 @@ import path from 'node:path';
 import { input } from '@inquirer/prompts';
 import pc from 'picocolors';
 
+import { detectProviderFromKey } from '../utils/providerRouter.js';
+
 // ─── Key definitions ──────────────────────────────────────────────────────────
 
 export type EnvKeyProfile = 'core' | 'backend' | 'frontend';
@@ -24,15 +26,14 @@ interface EnvKeySpec {
 
 const ENV_SPECS: EnvKeySpec[] = [
   {
-    key: 'OPENROUTER_API_KEY',
+    key: 'AI_API_KEY',
     profile: ['core', 'backend', 'frontend'],
-    description: 'OpenRouter API key (https://openrouter.ai → Dashboard → Keys)',
-    placeholder: 'sk-or-...',
+    description:
+      'AI API key — auto-detects provider (OpenRouter sk-or-…, Gemini AIza…, OpenAI sk-…, Claude sk-ant-…, Groq gsk_…)',
+    placeholder: 'sk-or-… | AIza… | sk-ant-… | sk-proj-… | gsk_…',
     secret: true,
   },
-  // OPENROUTER_MODEL is intentionally omitted here.
-  // It is auto-defaulted to google/gemini-2.5-flash by applyModelDefault()
-  // in src/cli/modelConfig.ts and can be hot-swapped via the ⚙️ menu option.
+  // AI_MODEL / OPENROUTER_MODEL auto-defaulted by applyModelDefault() in modelConfig.ts
   {
     key: 'ROUTES_DIR',
     profile: ['backend'],
@@ -105,6 +106,20 @@ function getEnvValue(key: string): string {
   return (process.env[key] ?? '').trim();
 }
 
+const AI_KEY_ENV_VARS = [
+  'AI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'GOOGLE_API_KEY',
+  'GEMINI_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GROQ_API_KEY',
+] as const;
+
+function hasAnyAiKey(): boolean {
+  return AI_KEY_ENV_VARS.some((k) => getEnvValue(k).length > 0);
+}
+
 function specsForProfiles(profiles: EnvKeyProfile[]): EnvKeySpec[] {
   const set = new Set(profiles);
   return ENV_SPECS.filter((s) => s.profile.some((p) => set.has(p)));
@@ -121,7 +136,10 @@ export async function runEnvGuard(profiles: EnvKeyProfile[]): Promise<void> {
   const envPath = resolveEnvPath();
   const allProfiles: EnvKeyProfile[] = ['core', ...profiles.filter((p) => p !== 'core')];
   const specs = specsForProfiles(allProfiles);
-  const missing = specs.filter((s) => !getEnvValue(s.key));
+  const missing = specs.filter((s) => {
+    if (s.key === 'AI_API_KEY' && hasAnyAiKey()) return false;
+    return !getEnvValue(s.key);
+  });
 
   if (missing.length === 0) return;
 
@@ -169,9 +187,21 @@ export async function runEnvGuard(profiles: EnvKeyProfile[]): Promise<void> {
 export function softValidateEnv(): string[] {
   const warnings: string[] = [];
 
-  const apiKey = getEnvValue('OPENROUTER_API_KEY');
-  if (apiKey && !apiKey.startsWith('sk-')) {
-    warnings.push('OPENROUTER_API_KEY looks unusual — expected format sk-or-…');
+  const aiKey =
+    getEnvValue('AI_API_KEY') ||
+    getEnvValue('OPENROUTER_API_KEY') ||
+    getEnvValue('GOOGLE_API_KEY') ||
+    getEnvValue('GEMINI_API_KEY') ||
+    getEnvValue('OPENAI_API_KEY') ||
+    getEnvValue('ANTHROPIC_API_KEY') ||
+    getEnvValue('GROQ_API_KEY');
+
+  if (aiKey) {
+    const provider = detectProviderFromKey(aiKey);
+    const known = ['openrouter', 'google', 'openai', 'groq', 'anthropic'] as const;
+    if (!known.includes(provider)) {
+      warnings.push('AI API key format not recognized — check your key');
+    }
   }
 
   const baseUrl = getEnvValue('BASE_APP_URL');
