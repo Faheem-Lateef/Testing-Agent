@@ -17,6 +17,7 @@
 | 5 | Patcher Layer | 🟢 Done | compile gate + retry context |
 | 6 | Trigger Layer | 🟢 Done | wired to index |
 | 7 | Orchestrator & Entry | 🟢 Done | full cycle + CLI |
+| 7b | Self-Evolution Loop | 🟢 Done | `orchestrator/selfEvolution.ts`, max 3 gens |
 | 8 | Git / PR Integration | 🟢 Done | PR on verified fix only |
 | 9 | Integration Testing | ⚪ Not Started | fixture app, mocks, README |
 | 10 | Phase 2 Features | ⚪ Deferred | Slack, SQLite, multi-env |

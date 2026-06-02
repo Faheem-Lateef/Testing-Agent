@@ -4,4 +4,5 @@ dist/
 *.log
 artifacts/
 tmp/
+temp/
 .DS_Store

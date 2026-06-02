@@ -9,6 +9,11 @@ const envSchema = z.object({
   OPENROUTER_API_KEY: z.string().min(1, 'is required'),
   OPENROUTER_MODEL: z.string().min(1, 'is required'),
   BASE_APP_URL: z.string().url('must be a valid URL').optional(),
+  FRONTEND_APP_URL: z.string().url('must be a valid URL').optional(),
+  E2E_MOBILE_VIEWPORT: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
   ROUTES_DIR: z.string().optional(),
   BACKEND_DIR: z.string().optional(),
   FIGMA_API_TOKEN: z.string().optional(),
@@ -29,9 +34,13 @@ const envSchema = z.object({
 
 type EnvConfig = z.infer<typeof envSchema>;
 
-export type AppConfig = Omit<EnvConfig, 'ROUTES_DIR' | 'BASE_APP_URL' | 'GIT_REPO_ROOT'> & {
+export type AppConfig = Omit<
+  EnvConfig,
+  'ROUTES_DIR' | 'BASE_APP_URL' | 'FRONTEND_APP_URL' | 'GIT_REPO_ROOT'
+> & {
   ROUTES_DIR: string;
   BASE_APP_URL: string;
+  FRONTEND_APP_URL: string;
   GIT_REPO_ROOT: string;
   hasFigma: boolean;
   hasGit: boolean;
@@ -70,6 +79,7 @@ export function loadConfig(): AppConfig {
 
   let routesDir = result.data.ROUTES_DIR;
   let baseAppUrl = result.data.BASE_APP_URL ?? 'http://localhost:3000';
+  let frontendAppUrl = result.data.FRONTEND_APP_URL ?? baseAppUrl;
   let gitRepoRoot = result.data.GIT_REPO_ROOT ?? '.';
 
   if (!routesDir?.trim()) {
@@ -83,6 +93,7 @@ export function loadConfig(): AppConfig {
     ...result.data,
     ROUTES_DIR: routesDir,
     BASE_APP_URL: baseAppUrl,
+    FRONTEND_APP_URL: frontendAppUrl,
     GIT_REPO_ROOT: gitRepoRoot,
     hasFigma: !!process.env['FIGMA_API_TOKEN'] && !!process.env['FIGMA_FILE_KEY'],
     hasGit: !!process.env['GITHUB_TOKEN'],

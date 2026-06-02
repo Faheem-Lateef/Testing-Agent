@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "afterShellExecution": [
+      {
+        "command": ".cursor/hooks/post-qa-run.sh",
+        "matcher": "tsx src/index\\.ts run|node dist/index\\.js run"
+      }
+    ]
+  }
+}

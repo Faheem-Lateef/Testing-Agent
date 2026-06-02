@@ -1,21 +1,20 @@
 # Active Context — Autonomous Full-Stack QA Agent
 
 > **Last updated:** 2026-06-02
-> **Session focus:** Migrated AI layer to OpenRouter (OpenAI SDK)
+> **Session focus:** Self-evolution meta-loop after test runs
 
 ---
 
 ## Current Focus
 
-**All AI calls now route through OpenRouter using the `openai` npm package.**
+**Post-run meta-review:** `src/orchestrator/selfEvolution.ts` analyzes run artifacts + agent sources via OpenRouter, applies patches, runs `npx tsc --noEmit`, rolls back on failure, re-runs `runMainTestSuites()` (max 3 generations).
 
 ### Completed This Session
-1. ✅ Removed `@anthropic-ai/sdk` dependency
-2. ✅ Added `openai` client pointed at `https://openrouter.ai/api/v1`
-3. ✅ Config: `OPENROUTER_API_KEY` + `OPENROUTER_MODEL` required; removed `ANTHROPIC_API_KEY`
-4. ✅ Updated `testGenerator.ts`, `bugFixer.ts`, `semanticDiff.ts`
-5. ✅ Shared helpers in `config.ts`: `createOpenRouterClient`, `handleOpenRouterAuthError`, `extractCompletionText`
-6. ✅ `npm run typecheck` passes
+1. ✅ `selfEvolution.ts` — analysis, patch pipeline, compile guard, rollback, re-test loop
+2. ✅ `orchestrator.ts` — `runMainTestSuites()` + `runSelfEvolutionLoop()` wired into `runFullQACycle()`
+3. ✅ Types: `QaRunArtifacts`, `EvolutionLoopResult`, etc. in `utils/types.ts`
+4. ✅ Project skill `.cursor/skills/qa-self-evolution/` and hook `.cursor/hooks/post-qa-run.sh`
+5. ✅ `npm run typecheck` passes
 
 ---
 

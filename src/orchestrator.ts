@@ -1,10 +1,13 @@
 import { runIntegrationApiPhase } from './api/integrationRunner.js';
+import type { IntegrationRunSummary } from './api/integrationReport.js';
+import { runFrontendE2eSweep } from './ui/frontendRunner.js';
 import { openPullRequest } from './git/prManager.js';
 import { runRetryLoop } from './patcher/retryLoop.js';
 import { captureScreenshot } from './ui/screenshot.js';
 import { fetchFigmaFrame } from './ui/figma.js';
 import { compareImages } from './ui/pixelDiff.js';
 import { runSemanticDiff } from './ui/semanticDiff.js';
+import { enrichArtifactsCoverage, runSelfEvolutionLoop } from './orchestrator/selfEvolution.js';
 import {
   getFigmaRouteMap,
   getFigmaSourceMap,
@@ -12,7 +15,7 @@ import {
   PIXEL_MISMATCH_THRESHOLD,
 } from './utils/config.js';
 import { logger } from './utils/logger.js';
-import type { BugReport, PatchOutcome } from './utils/types.js';
+import type { BugReport, FrontendE2eResult, PatchOutcome, QaRunArtifacts } from './utils/types.js';
 
 async function handlePatchOutcome(
   outcome: PatchOutcome,
@@ -90,17 +93,71 @@ async function runUiPhase(): Promise<void> {
   }
 }
 
+function toArtifactSummary(summary: IntegrationRunSummary): QaRunArtifacts['integrationSummary'] {
+  return {
+    endpointsDiscovered: summary.endpointsDiscovered,
+    testsTotal: summary.testsTotal,
+    testsPassed: summary.testsPassed,
+    testsFailed: summary.testsFailed,
+    aborted: summary.aborted,
+    abortReason: summary.abortReason,
+    backendProfile: summary.backendProfile,
+    e2eScenarioRan: summary.e2eScenarioRan,
+    openRouterVerified: summary.openRouterVerified,
+    openRouterGeneratedTests: summary.openRouterGeneratedTests,
+  };
+}
+
+/** Runs frontend E2E + backend integration suites and returns aggregated artifacts. */
+export async function runMainTestSuites(): Promise<QaRunArtifacts> {
+  loadConfig();
+
+  await runUiPhase();
+
+  let frontendE2e: FrontendE2eResult | undefined;
+  let frontendE2eError: string | undefined;
+
+  try {
+    frontendE2e = await runFrontendE2eSweep();
+    logger.info(
+      { steps: frontendE2e.stepsCompleted, diagnostics: frontendE2e.diagnostics.length },
+      'Frontend E2E sweep passed',
+    );
+  } catch (err) {
+    frontendE2eError = err instanceof Error ? err.message : String(err);
+    logger.error({ err: frontendE2eError }, 'Frontend E2E sweep failed');
+  }
+
+  const integrationSummary = await runIntegrationApiPhase();
+
+  return enrichArtifactsCoverage({
+    integrationSummary: toArtifactSummary(integrationSummary),
+    frontendE2e,
+    frontendE2eError,
+    coverageEstimate: { passRate: 0, failureRate: 0, consoleErrorCount: 0 },
+  });
+}
+
 export async function runFullQACycle(): Promise<void> {
   loadConfig();
   logger.info('QA cycle started — auto-discover, test all routes, fix failures, summarize');
 
-  await runUiPhase();
-  await runIntegrationApiPhase();
+  const initialArtifacts = await runMainTestSuites();
+
+  const evolution = await runSelfEvolutionLoop(initialArtifacts, runMainTestSuites);
+
+  logger.info(
+    {
+      generations: evolution.generationsRun,
+      finalPassRate: evolution.finalArtifacts.coverageEstimate.passRate,
+      finalFailures: evolution.finalArtifacts.integrationSummary.testsFailed,
+    },
+    'Self-evolution loop complete',
+  );
 
   logger.info('QA cycle finished');
 }
 
-// Legacy API phase kept for reference — integrationRunner replaces it
 export async function runApiPhase(): Promise<void> {
   await runIntegrationApiPhase();
 }
